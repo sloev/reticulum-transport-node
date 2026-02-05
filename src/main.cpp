@@ -2,13 +2,9 @@
 #include <RadioLib.h>
 #include <LittleFS.h>
 #include "BoardConfig.h"
-#include "RetiRouter.h"
-#include "RetiLoRa.h"
-#include "RetiSerial.h"
-#include "RetiBLE.h"
-#include "RetiWiFi.h"
-#include "RetiConfig.h"
+#include "Reti.h"
 
+// Hardware
 SX1262 radio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
 
 Reticulum::Identity* id;
@@ -39,13 +35,14 @@ void setup() {
     wifi = new Reticulum::WiFiDriver(); wifi->begin(config);
     
     router = new Reticulum::Router(id);
-    router->add(lora);
-    router->add(usb);
-    router->add(ble);
-    router->add(wifi);
-    router->st.begin();
+    router->addInterface(lora);
+    router->addInterface(usb);
+    router->addInterface(ble);
+    router->addInterface(wifi);
+    router->storage.begin();
     
-    router->announce();
+    router->sendAnnounce();
+    RNS_LOG("Node Active.");
 }
 
 void loop() {

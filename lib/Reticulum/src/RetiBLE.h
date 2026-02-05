@@ -25,11 +25,11 @@ public:
         std::string v = pC->getValue();
         for(char c : v) {
             uint8_t b = (uint8_t)c;
-            if(b==0xC0) { if(buf.size()>0) rx(buf); buf.clear(); esc=false; } 
+            if(b==0xC0) { if(buf.size()>0) receive(buf); buf.clear(); esc=false; } 
             else buf.push_back(b);
         }
     }
-    void tx(std::vector<uint8_t> d) override {
+    void sendRaw(const std::vector<uint8_t>& d) override {
         if(!connected) return;
         std::vector<uint8_t> k = {0xC0};
         for(uint8_t b:d) { if(b==0xC0){k.push_back(0xDB);k.push_back(0xDC);} else k.push_back(b); }

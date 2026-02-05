@@ -20,6 +20,8 @@ public:
         if(raw.size()<2) return p;
         uint8_t h = raw[0];
         p.hops = raw[1];
+        
+        // Bit unpacking
         bool headerType = (h>>6)&1;
         p.contextFlag = (h>>5)&1;
         p.destType = (h>>2)&3;
@@ -49,11 +51,6 @@ public:
         return b;
     }
     
-    static Packet createAnnounce(Identity& id) {
-        Packet p; p.type=ANNOUNCE; p.destType=PLAIN;
-        p.data = id.getPublicKey();
-        for(int i=0;i<10;i++) p.data.push_back((uint8_t)esp_random());
-        return p;
-    }
+    static Packet createAnnounce(class Identity& id); // Forward decl, impl in main or router
 };
 }

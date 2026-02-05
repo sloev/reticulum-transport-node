@@ -10,6 +10,7 @@ public:
 
     Link(std::vector<uint8_t> r) : remote(r) { Crypto::genKeys(myPub, myPriv); }
 
+    // Strict Spec: HKDF Salt must be the Request Packet Hash
     void accept(std::vector<uint8_t> peerPub, std::vector<uint8_t> hash) {
         reqHash = hash; 
         std::vector<uint8_t> s = Crypto::x25519_shared(myPriv, peerPub);
@@ -19,14 +20,7 @@ public:
         active = true;
     }
 
-    Packet createProof(Identity& id) {
-        std::vector<uint8_t> t = reqHash;
-        t.insert(t.end(), myPub.begin(), myPub.end());
-        std::vector<uint8_t> sig = id.sign(t);
-        Packet p; p.type=PROOF; p.destType=SINGLE; p.addresses=remote;
-        p.data = myPub; p.data.insert(p.data.end(), sig.begin(), sig.end());
-        return p;
-    }
+    Packet createProof(class Identity& id); // Impl below to avoid circular dependency issues
 
     Packet encrypt(std::vector<uint8_t> pl, uint8_t ctx=0) {
         if(!active) return Packet();

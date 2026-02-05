@@ -19,7 +19,7 @@ public:
         active = true;
     }
     
-    void tx(std::vector<uint8_t> d) override {
+    void sendRaw(const std::vector<uint8_t>& d) override {
         if(WiFi.status() == WL_CONNECTED && active) {
             udp.beginPacket(IPAddress(255,255,255,255), 4242);
             udp.write(d.data(), d.size());
@@ -33,7 +33,7 @@ public:
             if(len) {
                 std::vector<uint8_t> b(len);
                 udp.read(b.data(), len);
-                rx(b);
+                receive(b);
             }
         }
     }

@@ -1,21 +1,46 @@
 #pragma once
 #include <RadioLib.h>
 #include "RetiInterface.h"
+
 namespace Reticulum {
 class LoRaInterface : public Interface {
-    SX1262* r;
-    volatile bool f = false;
+    SX1262* radio;
+    volatile bool rxFlag = false;
+
 public:
-    LoRaInterface(SX1262* radio) : Interface("LoRa"), r(radio) {}
+    LoRaInterface(SX1262* r) : Interface("LoRa"), radio(r) {}
+
     bool begin(float freq) {
-        if(r->begin(freq, 125.0, 9, 5, 0x12, 22, 8) != RADIOLIB_ERR_NONE) return false;
-        r->setDio2AsRfSwitch(true); r->setCRC(true); return true;
+        int state = radio->begin(freq, 125.0, 9, 5, 0x12, 22, 8);
+        if(state != RADIOLIB_ERR_NONE) return false;
+        
+        radio->setDio2AsRfSwitch(true);
+        radio->setCRC(true);
+        return true;
     }
-    void start(void (*isr)()) { r->setPacketReceivedAction(isr); r->startReceive(); }
-    void setFlag() { f = true; }
-    void tx(std::vector<uint8_t> d) override { r->standby(); r->transmit(d.data(), d.size()); r->startReceive(); }
+
+    void start(void (*isr)()) {
+        radio->setPacketReceivedAction(isr);
+        radio->startReceive();
+    }
+    
+    void setFlag() { rxFlag = true; }
+
+    void sendRaw(const std::vector<uint8_t>& data) override {
+        radio->standby();
+        radio->transmit(const_cast<uint8_t*>(data.data()), data.size());
+        radio->startReceive();
+    }
+
     void handle() {
-        if(f) { f=false; size_t l=r->getPacketLength(); uint8_t b[256]; r->readData(b,l); rx({b,b+l}); r->startReceive(); }
+        if(rxFlag) {
+            rxFlag = false;
+            size_t len = radio->getPacketLength();
+            uint8_t buf[256];
+            radio->readData(buf, len);
+            receive(std::vector<uint8_t>(buf, buf+len));
+            radio->startReceive();
+        }
     }
 };
 }

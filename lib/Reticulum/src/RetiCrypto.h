@@ -1,9 +1,8 @@
 #pragma once
-#include <Arduino.h>
-#include <vector>
+#include "RetiCommon.h"
 #include <monocypher.h>
-#include "mbedtls/aes.h"
 #include "mbedtls/md.h"
+#include "mbedtls/aes.h"
 
 namespace Reticulum {
 class Crypto {
