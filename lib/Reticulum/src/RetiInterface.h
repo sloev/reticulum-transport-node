@@ -7,12 +7,11 @@ namespace Reticulum {
 
 class Interface {
 protected:
-    struct FragState {
+    struct ReassemblyBuffer {
         unsigned long ts;
-        std::vector<uint8_t> buffer;
+        std::vector<uint8_t> data;
     };
-    // Map Sequence Number -> Fragment State
-    std::map<uint8_t, FragState> reassemblyMap;
+    std::map<uint8_t, ReassemblyBuffer> rx_buffer;
 
 public:
     String name;
@@ -23,65 +22,62 @@ public:
     virtual void sendRaw(const std::vector<uint8_t>& data) = 0;
 
     void send(const std::vector<uint8_t>& packet) {
-        // RNode Logic:
-        // Small packets are sent raw.
-        // Large packets (> MTU) are split into two frames with a 1-byte header.
-        // Header: [ Seq (4 bits) | SplitFlag (4 bits) ]
-        // We use Bit 0 as "Is First Fragment".
-        
         if (packet.size() <= mtu) {
             sendRaw(packet);
-        } else {
-            // Split into 2 parts
-            uint8_t seq = esp_random() & 0x0F;
-            size_t splitPoint = mtu - 1; // Reserve 1 byte for header
-            
-            // Part 1: Header (Seq | 0x01) + Data
-            std::vector<uint8_t> p1; 
-            p1.push_back((seq << 4) | 0x01); // 0x01 = First Part
-            p1.insert(p1.end(), packet.begin(), packet.begin() + splitPoint);
-            sendRaw(p1);
-            
-            delay(25); // Allow airtime clearing
-            
-            // Part 2: Header (Seq | 0x00) + Data
-            std::vector<uint8_t> p2;
-            p2.push_back((seq << 4) | 0x00); // 0x00 = Last Part
-            p2.insert(p2.end(), packet.begin() + splitPoint, packet.end());
-            sendRaw(p2);
+            return;
         }
+
+        // RNode Physical Layer Fragmentation
+        // Header: [ Seq(4) | Reserved(3) | SplitFlag(1) ]
+        // Logic: SplitFlag 1 = First Part. SplitFlag 0 = Second Part.
+        
+        uint8_t seq = esp_random() & 0x0F;
+        size_t split_idx = mtu - 1; 
+
+        // Frame A (Start)
+        std::vector<uint8_t> fa;
+        fa.reserve(mtu);
+        fa.push_back((seq << 4) | 0x01);
+        fa.insert(fa.end(), packet.begin(), packet.begin() + split_idx);
+        sendRaw(fa);
+
+        delay(10); // Airtime throttle
+
+        // Frame B (End)
+        std::vector<uint8_t> fb;
+        fb.reserve(packet.size() - split_idx + 1);
+        fb.push_back((seq << 4) | 0x00);
+        fb.insert(fb.end(), packet.begin() + split_idx, packet.end());
+        sendRaw(fb);
     }
 
     void receive(const std::vector<uint8_t>& data) {
         if (data.empty()) return;
-        
-        // Check for Split Header
-        // Heuristic: RNode splits are usually max-length. 
-        // If we see a weird header on a short packet, assume it's just data.
-        
+
         uint8_t header = data[0];
         uint8_t seq = (header >> 4) & 0x0F;
-        bool isSplitStart = (header & 0x01) == 1;
-        
-        // RNode Logic: If Part 1, it must be exactly MTU sized (filled frame)
-        if (isSplitStart && data.size() == mtu) {
-            // Start Reassembly
-            FragState& fs = reassemblyMap[seq];
-            fs.ts = millis();
-            fs.buffer.assign(data.begin() + 1, data.end());
+        bool is_split = (header & 0x01) == 1;
+        bool is_rnode_frame = false;
+
+        // Heuristic: RNode split frames are usually max MTU
+        if (is_split && data.size() == mtu) {
+            auto& buf = rx_buffer[seq];
+            buf.ts = millis();
+            buf.data.assign(data.begin() + 1, data.end());
+            is_rnode_frame = true;
         } 
-        else if (!isSplitStart && reassemblyMap.count(seq)) {
-            // Found Part 2 matching Sequence
-            FragState& fs = reassemblyMap[seq];
-            if (millis() - fs.ts < 3000) { // 3s Reassembly Timeout
-                fs.buffer.insert(fs.buffer.end(), data.begin() + 1, data.end());
-                // Packet Complete - Pass Up
-                if (onPacket) onPacket(fs.buffer, this);
+        else if (!is_split && rx_buffer.count(seq)) {
+            auto& buf = rx_buffer[seq];
+            if (millis() - buf.ts < 2000) {
+                buf.data.insert(buf.data.end(), data.begin() + 1, data.end());
+                if (onPacket) onPacket(buf.data, this);
             }
-            reassemblyMap.erase(seq);
-        } else {
-            // Standard Packet (Not part of a split we are tracking)
-            if(onPacket) onPacket(data, this);
+            rx_buffer.erase(seq);
+            is_rnode_frame = true;
+        }
+
+        if (!is_rnode_frame && onPacket) {
+            onPacket(data, this);
         }
     }
 };
