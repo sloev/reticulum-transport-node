@@ -28,25 +28,23 @@ public:
         }
 
         // RNode Physical Layer Fragmentation
-        // Header: [ Seq(4) | Reserved(3) | SplitFlag(1) ]
-        // CRITICAL: SplitFlag must be 1 for BOTH frames.
-        
+        // Logic: Both frames get Flag=1.
         uint8_t seq = esp_random() & 0x0F;
         size_t split_idx = mtu - 1; 
 
-        // Frame A (Start)
+        // Frame A
         std::vector<uint8_t> fa;
         fa.reserve(mtu);
-        fa.push_back((seq << 4) | 0x01); // Flag = 1
+        fa.push_back((seq << 4) | 0x01);
         fa.insert(fa.end(), packet.begin(), packet.begin() + split_idx);
         sendRaw(fa);
 
-        delay(15); // Airtime throttle
+        delay(15); 
 
-        // Frame B (End)
+        // Frame B
         std::vector<uint8_t> fb;
         fb.reserve(packet.size() - split_idx + 1);
-        fb.push_back((seq << 4) | 0x01); // Flag = 1 (Required for RNode Interop)
+        fb.push_back((seq << 4) | 0x01); 
         fb.insert(fb.end(), packet.begin() + split_idx, packet.end());
         sendRaw(fb);
     }
@@ -54,36 +52,40 @@ public:
     void receive(const std::vector<uint8_t>& data) {
         if (data.empty()) return;
 
-        uint8_t header = data[0];
-        uint8_t seq = (header >> 4) & 0x0F;
-        bool is_split = (header & 0x01) == 1;
-        bool processed = false;
-
-        if (is_split) {
-            if (rx_buffer.count(seq)) {
-                // We have state for this Seq -> This is Frame B
-                auto& buf = rx_buffer[seq];
-                // Sanity check: Frame B implies we are completing a packet
-                if (millis() - buf.ts < 2000) {
-                    buf.data.insert(buf.data.end(), data.begin() + 1, data.end());
-                    if (onPacket) onPacket(buf.data, this);
-                }
-                rx_buffer.erase(seq); // Clear state
-                processed = true;
-            } 
-            else if (data.size() == mtu) {
-                // No state -> This is Frame A
-                // Heuristic: Frame A is usually full MTU
-                auto& buf = rx_buffer[seq];
-                buf.ts = millis();
-                buf.data.assign(data.begin() + 1, data.end());
-                processed = true;
+        // Garbage Collect Stale Buffers
+        // Prevents memory leak if Part 2 never arrives
+        static unsigned long last_clean = 0;
+        if (millis() - last_clean > 5000) {
+            last_clean = millis();
+            for (auto it = rx_buffer.begin(); it != rx_buffer.end(); ) {
+                if (millis() - it->second.ts > 3000) it = rx_buffer.erase(it);
+                else ++it;
             }
         }
 
-        // If it wasn't a split packet (or malformed split), treat as raw
-        if (!processed && onPacket) {
-            onPacket(data, this);
+        uint8_t header = data[0];
+        uint8_t seq = (header >> 4) & 0x0F;
+        bool is_split = (header & 0x01) == 1;
+
+        if (is_split) {
+            if (rx_buffer.count(seq)) {
+                // Part 2 arrived
+                auto& buf = rx_buffer[seq];
+                buf.data.insert(buf.data.end(), data.begin() + 1, data.end());
+                if (onPacket) onPacket(buf.data, this);
+                rx_buffer.erase(seq);
+            } 
+            else if (data.size() == mtu) {
+                // Part 1 arrived (Heuristic: Must be full MTU)
+                auto& buf = rx_buffer[seq];
+                buf.ts = millis();
+                buf.data.assign(data.begin() + 1, data.end());
+            }
+            // If is_split but not MTU size and no buffer -> Invalid/Fragment, ignore.
+        } 
+        else {
+            // Standard Packet
+            if(onPacket) onPacket(data, this);
         }
     }
 };

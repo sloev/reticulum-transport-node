@@ -19,8 +19,12 @@ public:
 
         esp_now_peer_info_t peer = {};
         memset(&peer, 0, sizeof(peer));
-        for(int i=0; i<6; i++) peer.peer_addr[i] = 0xFF; // Broadcast
-        peer.channel = 0; // Must match WiFi channel
+        for(int i=0; i<6; i++) peer.peer_addr[i] = 0xFF; 
+        
+        // Critical: 0 means "listen on current WiFi channel"
+        // If this is set to a specific number while WiFi acts on another, 
+        // packets will drop.
+        peer.channel = 0; 
         peer.encrypt = false;
 
         if (esp_now_add_peer(&peer) != ESP_OK) return false;
@@ -34,6 +38,7 @@ public:
     }
 
     void sendRaw(const std::vector<uint8_t>& data) override {
+        // ESP-NOW channel follows WiFi channel automatically if channel=0.
         const uint8_t dest[] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
         esp_now_send(dest, data.data(), data.size());
     }

@@ -3,21 +3,20 @@
 #include "RetiLink.h"
 #include "RetiStorage.h"
 #include "RetiPacket.h"
+#include <map>
 
 namespace Reticulum {
+
 class Router {
 public:
     Identity* id;
     Storage storage;
     std::vector<Interface*> interfaces;
     
-    // Hash -> Interface
-    std::map<String, Interface*> table; 
+    // Hash (Binary) -> Timestamp
+    std::map<std::vector<uint8_t>, unsigned long> seen;
     
-    // Seen Packets (Flood Control)
-    std::map<String, unsigned long> seen;
-
-    // Links
+    // Active Links
     std::map<String, Link*> links;
 
     Router(Identity* i) : id(i) {}
@@ -30,23 +29,27 @@ public:
     }
 
     void process(const std::vector<uint8_t>& raw, Interface* src) {
+        // 1. Flood Control (Memory Optimized)
         std::vector<uint8_t> h = Crypto::sha256(raw);
-        String hStr = toHex(h);
-        if(seen.count(hStr)) return;
-        seen[hStr] = millis();
+        
+        // Truncate hash to 16 bytes to save RAM (RNS collisions negligible here)
+        h.resize(16); 
+        
+        if(seen.count(h)) return;
+        seen[h] = millis();
 
         Packet p = Packet::parse(raw);
-        bool forMe = false; // Logic simplified for brevity
+        bool forMe = false; // Add destination check logic here if needed
         
         if(p.type == LINK_REQ && forMe) {
              Link* l = new Link(p.addresses);
-             l->accept(p.data, h);
+             // Use full hash for crypto binding
+             l->accept(p.data, Crypto::sha256(raw)); 
              links[toHex(p.addresses)] = l;
-             // Send Proof...
         }
         
         if(!forMe) {
-             // Forward logic
+             // Flood to all other interfaces
              for(auto* iface : interfaces) {
                  if(iface != src) iface->send(raw);
              }
@@ -62,10 +65,24 @@ public:
     }
     
     void loop() {
-        // Storage maintenance
+        // 1. Storage Maintenance
+        // storage.loop();
+
+        // 2. Routing Table Garbage Collection (CRITICAL)
+        // Run every 10 seconds
+        static unsigned long last_gc = 0;
+        if (millis() - last_gc > 10000) {
+            last_gc = millis();
+            auto it = seen.begin();
+            while (it != seen.end()) {
+                // RNS packet lifetime is usually short, drop after 60s
+                if (millis() - it->second > 60000) {
+                    it = seen.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
     }
 };
-
-// Implement Packet::createAnnounce logic if needed, but simplified above.
-// Implement Link::createProof logic here to handle circular dependency if strict.
 }
