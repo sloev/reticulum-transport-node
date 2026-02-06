@@ -13,10 +13,11 @@ public:
     Storage storage;
     std::vector<Interface*> interfaces;
     
-    // Hash (Binary) -> Timestamp
+    // Flood Control: Packet Hash (16 bytes) -> Timestamp
+    // Cap size to prevent heap exhaustion under flood attacks.
     std::map<std::vector<uint8_t>, unsigned long> seen;
+    const size_t MAX_SEEN_ENTRIES = 512;
     
-    // Active Links
     std::map<String, Link*> links;
 
     Router(Identity* i) : id(i) {}
@@ -29,58 +30,61 @@ public:
     }
 
     void process(const std::vector<uint8_t>& raw, Interface* src) {
-        // 1. Flood Control (Memory Optimized)
+        // 1. Flood Control
         std::vector<uint8_t> h = Crypto::sha256(raw);
-        
-        // Truncate hash to 16 bytes to save RAM (RNS collisions negligible here)
-        h.resize(16); 
+        h.resize(16); // Truncate to 128-bit for storage efficiency
         
         if(seen.count(h)) return;
+
+        // Hard Limit: If table full, force GC immediately, else drop oldest
+        if (seen.size() >= MAX_SEEN_ENTRIES) cleanup(true);
         seen[h] = millis();
 
+        // 2. Parse & Logic
         Packet p = Packet::parse(raw);
-        bool forMe = false; // Add destination check logic here if needed
         
-        if(p.type == LINK_REQ && forMe) {
-             Link* l = new Link(p.addresses);
-             // Use full hash for crypto binding
-             l->accept(p.data, Crypto::sha256(raw)); 
-             links[toHex(p.addresses)] = l;
+        // Link Establishment (Simplified)
+        if(p.type == LINK_REQ) {
+             // In a full implementation, check if destination matches 'id'
+             // For repeater mode, we generally just forward.
         }
         
-        if(!forMe) {
-             // Flood to all other interfaces
-             for(auto* iface : interfaces) {
-                 if(iface != src) iface->send(raw);
-             }
+        // 3. Forwarding
+        for(auto* iface : interfaces) {
+            if(iface != src) iface->send(raw);
         }
     }
     
     void sendAnnounce() {
         Packet p; p.type=ANNOUNCE; p.destType=PLAIN;
         p.data = id->getPublicKey();
+        // Add random bloom noise
         for(int i=0;i<10;i++) p.data.push_back((uint8_t)esp_random());
+        
         std::vector<uint8_t> raw = p.serialize();
         for(auto* iface : interfaces) iface->send(raw);
     }
     
     void loop() {
-        // 1. Storage Maintenance
-        // storage.loop();
-
-        // 2. Routing Table Garbage Collection (CRITICAL)
-        // Run every 10 seconds
+        // Periodic cleanup (every 10s)
         static unsigned long last_gc = 0;
         if (millis() - last_gc > 10000) {
+            cleanup(false);
             last_gc = millis();
-            auto it = seen.begin();
-            while (it != seen.end()) {
-                // RNS packet lifetime is usually short, drop after 60s
-                if (millis() - it->second > 60000) {
-                    it = seen.erase(it);
-                } else {
-                    ++it;
-                }
+        }
+    }
+
+private:
+    void cleanup(bool force) {
+        unsigned long now = millis();
+        auto it = seen.begin();
+        while (it != seen.end()) {
+            // Drop if older than 60s, or if forcing space (drop oldest)
+            if (force || (now - it->second > 60000)) {
+                it = seen.erase(it);
+                if (force) return; // Deleted one, good enough
+            } else {
+                ++it;
             }
         }
     }

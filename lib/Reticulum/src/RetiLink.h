@@ -29,40 +29,35 @@ public:
     Packet encrypt(std::vector<uint8_t> payload, uint8_t context=0) {
         if(!active) return Packet();
 
-        // 1. IV Generation
+        // 1. AES-128-CBC
         std::vector<uint8_t> iv(16);
         for(int i=0; i<16; i++) iv[i] = (uint8_t)esp_random();
 
-        // 2. Ciphertext Generation (AES-128-CBC)
-        std::vector<uint8_t> plaintext = {context};
-        plaintext.insert(plaintext.end(), payload.begin(), payload.end());
-        std::vector<uint8_t> cipher = Crypto::aes_encrypt(enc_key, iv, plaintext);
+        std::vector<uint8_t> pt = {context};
+        pt.insert(pt.end(), payload.begin(), payload.end());
+        std::vector<uint8_t> ct = Crypto::aes_encrypt(enc_key, iv, pt);
 
-        // 3. Fernet Token Construction
-        // Spec: [0x80] [TS(8)] [IV(16)] [Cipher(N)] [HMAC(32)]
-        std::vector<uint8_t> token;
-        token.reserve(57 + cipher.size());
+        // 2. Fernet Token: [0x80] [TS] [IV] [Cipher] [HMAC]
+        std::vector<uint8_t> t;
+        t.reserve(57 + ct.size());
         
-        token.push_back(0x80); // Version
+        t.push_back(0x80); 
 
-        // Timestamp (Big Endian)
-        time_t now; 
-        time(&now);
-        uint64_t ts = (now > 1672531200) ? (uint64_t)now : 0; // Epoch check (2023)
-        for(int i=7; i>=0; i--) token.push_back((ts >> (i*8)) & 0xFF);
+        time_t now; time(&now);
+        uint64_t ts = (now > 1672531200) ? (uint64_t)now : 0; 
+        for(int i=7; i>=0; i--) t.push_back((ts >> (i*8)) & 0xFF);
 
-        token.insert(token.end(), iv.begin(), iv.end());
-        token.insert(token.end(), cipher.begin(), cipher.end());
+        t.insert(t.end(), iv.begin(), iv.end());
+        t.insert(t.end(), ct.begin(), ct.end());
 
-        // 4. HMAC Signature
-        std::vector<uint8_t> mac = Crypto::hmac_sha256(auth_key, token);
-        token.insert(token.end(), mac.begin(), mac.end());
+        std::vector<uint8_t> mac = Crypto::hmac_sha256(auth_key, t);
+        t.insert(t.end(), mac.begin(), mac.end());
 
         Packet p;
         p.type = DATA;
         p.destType = LINK;
         p.addresses = remote_addr;
-        p.data = token;
+        p.data = t;
         return p;
     }
 };

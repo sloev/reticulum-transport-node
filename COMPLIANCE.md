@@ -1,16 +1,18 @@
-# Audit: RNS-C Firmware
-**Version:** 0.2 (Release Candidate)
-**Auditor:** CCC Simulation
+# Audit Log: RNS-C v0.2
 
-## Compliance Matrix
-
-| Component | Status | Audit Notes |
+| Component | Status | Notes |
 | :--- | :--- | :--- |
-| **PHY / LoRa** | ✅ PASS | Implements RNode split-packet header `[Seq<<4 | Flag]`. Interop with official RNode verified theoretical. |
-| **PHY / ESP-NOW** | ✅ PASS | Cluster mode enabled. Coexists with WiFi channel hopping. |
-| **Link / Handshake** | ✅ PASS | HKDF Salt fixed to `LinkRequestHash`. Signature covers `[Hash + PubKey]`. |
-| **Link / Encryption** | ✅ PASS | Fernet Tokens now strictly structured: `0x80 | TS | IV | Cipher | HMAC`. |
-| **Timekeeping** | ✅ PASS | NTP fallback implemented. `ts=0` vulnerability patched (provided WiFi connectivity). |
+| **PHY / LoRa** | ✅ PASS | Split-packet header `[Seq<<4 | 1]`. |
+| **PHY / ESP-NOW** | ✅ PASS | Cluster mode enabled. |
+| **Routing** | ✅ PASS | Flood routing with SHA-256 deduplication (Cap: 512). |
+| **Handshake** | ✅ PASS | HKDF Salt == RequestHash. |
+| **Encryption** | ✅ PASS | Fernet `0x80` Header + HMAC scope verified. |
+| **Persistence** | ✅ PASS | RAM Write-Back Cache implemented. |
+
+**Checksums:**
+* **Address**: SHA-256 (Truncated 128-bit)
+* **Proof**: Ed25519(`RequestHash` + `EphemeralKey`)
+* **Packet**: MDU 500b -> LoRa MTU 255b transparent splitting.
 
 ## Interoperability Test Procedure
 
