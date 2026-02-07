@@ -1,8 +1,9 @@
 #pragma once
 #include "RetiCommon.h"
 
-// Monocypher v4 Unified Header
-#include <monocypher.h>
+// CRITICAL: Use quotes to force using the local lib/Monocypher files
+#include "monocypher.h"
+#include "monocypher-ed25519.h"
 
 #include "mbedtls/md.h"
 #include "mbedtls/aes.h"
@@ -53,7 +54,7 @@ public:
         pub.resize(32); priv.resize(32);
         for(int i=0; i<32; i++) priv[i] = (uint8_t)esp_random();
         
-        // X25519 Key Generation (Monocypher API)
+        // Monocypher v4 API (Local)
         crypto_x25519_public_key(pub.data(), priv.data());
     }
 

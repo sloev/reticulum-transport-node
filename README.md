@@ -50,3 +50,7 @@ Connect via USB.
 ## Flash Storage
 
 Packets destined for offline nodes are cached in RAM. If RAM pressure exceeds 512 entries, or upon shutdown, packets are flushed to LittleFS.
+
+## Copyright:
+
+* [./lib/Monocypher/](./lib/Monocypher) see license: [./MONOCYPHER_LICENSE.md](MONOCYPHER_LICENSE.md)
