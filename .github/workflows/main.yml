@@ -2,7 +2,7 @@ name: RNS-C Build & Release
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions:
