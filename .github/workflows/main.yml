@@ -30,12 +30,17 @@ jobs:
       - name: Compile & Merge
         run: pio run
         
-      - name: Verify Output
+      - name: Verify & Checksum
         id: verify
         run: |
-          if [ -f ".pio/build/heltec_wifi_lora_32_V3/firmware_merged.bin" ]; then
+          BUILD_PATH=".pio/build/heltec_wifi_lora_32_V3/firmware_merged.bin"
+          if [ -f "$BUILD_PATH" ]; then
             echo "::notice::Binary build successful"
-            echo "firmware_path=.pio/build/heltec_wifi_lora_32_V3/firmware_merged.bin" >> $GITHUB_OUTPUT
+            # Calculate SHA256 for security verification
+            sha256sum "$BUILD_PATH" > firmware_merged.sha256
+            
+            echo "firmware_path=$BUILD_PATH" >> $GITHUB_OUTPUT
+            echo "checksum_path=firmware_merged.sha256" >> $GITHUB_OUTPUT
           else
             echo "::error::Merged binary not found! Check merge_bin.py"
             exit 1
@@ -45,7 +50,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: firmware_merged.bin
-          path: ${{ steps.verify.outputs.firmware_path }}
+          path: |
+            ${{ steps.verify.outputs.firmware_path }}
+            ${{ steps.verify.outputs.checksum_path }}
 
   release:
     name: Create Release
@@ -73,13 +80,19 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           name: RNS-C Firmware ${{ steps.tag.outputs.release_tag }}
-          files: firmware_merged.bin
+          files: |
+             firmware_merged.bin
+             firmware_merged.sha256
           generate_release_notes: true
           body: |
             ## 🚀 New Build
             **Commit:** ${{ github.sha }}
             
+            ### 🔒 Verification
+            SHA256 Checksum provided in `firmware_merged.sha256`.
+            
             ### 📦 Installation
             1. Download `firmware_merged.bin`
             2. Go to [Espressif Web Tool](https://espressif.github.io/esptool-js/)
-            3. Flash at offset `0x0`
+            3. Connect Device
+            4. Flash `firmware_merged.bin` at offset `0x0`
