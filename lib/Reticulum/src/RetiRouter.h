@@ -7,11 +7,14 @@
 
 namespace Reticulum {
 
+class LXMFPropagationNode;
+
 class Router {
 public:
     Identity* id;
     Storage storage;
     std::vector<Interface*> interfaces;
+    std::function<void(const std::vector<uint8_t>&, const Packet&, Interface*)> onLocalDelivery;
     
     // Flood Control: Packet Hash (16 bytes) -> Timestamp
     // Cap size to prevent heap exhaustion under flood attacks.
@@ -42,6 +45,11 @@ public:
 
         // 2. Parse & Logic
         Packet p = Packet::parse(raw);
+        
+        // Local Delivery Hook (e.g. for LXMF)
+        if (onLocalDelivery) {
+            onLocalDelivery(raw, p, src);
+        }
         
         // Link Establishment (Simplified)
         if(p.type == LINK_REQ) {

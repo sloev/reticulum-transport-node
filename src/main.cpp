@@ -62,6 +62,13 @@ void setup() {
 #endif
     
     router->storage.begin();
+    
+    // 5. Application Layer (LXMF)
+    Reticulum::LXMFPropagationNode* lxmfNode = new Reticulum::LXMFPropagationNode();
+    router->onLocalDelivery = [lxmfNode](const std::vector<uint8_t>& raw, const Reticulum::Packet& p, Reticulum::Interface* src) {
+        lxmfNode->handleIncoming(raw, p);
+    };
+
     router->sendAnnounce();
     
     RNS_LOG("RNS Node Online. Addr: %s", Reticulum::toHex(id->getAddress()).c_str());
