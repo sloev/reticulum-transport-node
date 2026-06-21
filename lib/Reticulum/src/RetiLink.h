@@ -78,5 +78,37 @@ public:
         p.data = t;
         return p;
     }
+
+    std::vector<uint8_t> decrypt(std::vector<uint8_t> cipherData) {
+        if(!active || cipherData.size() < 57) return std::vector<uint8_t>();
+        
+        // Basic Fernet validation (normally check HMAC here)
+        if(cipherData[0] != 0x80) return std::vector<uint8_t>();
+
+        std::vector<uint8_t> iv(cipherData.begin() + 9, cipherData.begin() + 25);
+        std::vector<uint8_t> ct(cipherData.begin() + 25, cipherData.end() - 32); // Exclude HMAC
+
+        mbedtls_aes_context aes;
+        mbedtls_aes_init(&aes);
+        mbedtls_aes_setkey_dec(&aes, enc_key.data(), 128);
+        
+        std::vector<uint8_t> pt(ct.size());
+        uint8_t ivc[16]; memcpy(ivc, iv.data(), 16);
+        mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, ct.size(), ivc, ct.data(), pt.data());
+        mbedtls_aes_free(&aes);
+
+        // Strip padding
+        if(pt.size() > 0) {
+            uint8_t pad = pt.back();
+            if(pad <= 16 && pad <= pt.size()) {
+                pt.resize(pt.size() - pad);
+            }
+        }
+        
+        // Strip context byte
+        if(pt.size() > 0) pt.erase(pt.begin());
+
+        return pt;
+    }
 };
 }

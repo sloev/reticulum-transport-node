@@ -64,6 +64,28 @@ public:
             }
             return;
         }
+
+        // Handle incoming data over an established Link (The Sync Request)
+        if (p.type == DATA && p.destType == LINK) {
+            for (auto* link : activeSyncLinks) {
+                // Link ID is the first 16 bytes of req_hash
+                bool match = true;
+                for (size_t i = 0; i < 16 && i < p.addresses.size(); i++) {
+                    if (p.addresses[i] != link->req_hash[i]) { match = false; break; }
+                }
+                
+                if (match) {
+                    std::vector<uint8_t> plain = link->decrypt(p.data);
+                    if (plain.size() > 0) {
+                        RNS_LOG("LXMF: Decrypted Sync Request payload.");
+                        // The payload contains the identity hash of the user requesting sync.
+                        // We trigger the file stream here.
+                        handleSyncRequest(src, plain, link);
+                    }
+                    return;
+                }
+            }
+        }
         
         // Handle incoming LXMF Data (Caching)
         if (p.type == DATA) {
@@ -91,8 +113,8 @@ public:
         }
     }
 
-    void handleSyncRequest(Interface* srcIface, const std::vector<uint8_t>& userHash) {
-        RNS_LOG("LXMF: Received Sync Request.");
+    void handleSyncRequest(Interface* srcIface, const std::vector<uint8_t>& userHash, Link* link) {
+        RNS_LOG("LXMF: Sync Request triggered for identity.");
         
         File root = LittleFS.open("/lxmf");
         if (!root || !root.isDirectory()) return;
@@ -101,6 +123,18 @@ public:
         while (file) {
             if (!file.isDirectory()) {
                 RNS_LOG("LXMF: Syncing %s", file.name());
+                // Read chunks and stream through link
+                std::vector<uint8_t> payload;
+                while(file.available()) {
+                    payload.push_back(file.read());
+                }
+                
+                // Encrypt payload and send (in a production environment, chunking is required)
+                Packet p = link->encrypt(payload, 0);
+                if (p.data.size() > 0) {
+                    // Send back to srcIface (would require Interface API hook here)
+                    // srcIface->send(p.serialize());
+                }
             }
             file = root.openNextFile();
         }
