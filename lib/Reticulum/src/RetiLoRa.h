@@ -3,19 +3,28 @@
 #include "RetiInterface.h"
 
 namespace Reticulum {
+
+#if defined(BOARD_SENSECAP_T1000)
+typedef LR1110 RadioType;
+#else
+typedef SX1262 RadioType;
+#endif
+
 class LoRaInterface : public Interface {
-    SX1262* radio;
+    RadioType* radio;
     volatile bool rxFlag = false;
 
 public:
     // MTU 255 triggers split logic for 500-byte packets
-    LoRaInterface(SX1262* r) : Interface("LoRa", 255), radio(r) {}
+    LoRaInterface(RadioType* r) : Interface("LoRa", 255), radio(r) {}
 
     bool begin(float freq) {
         int state = radio->begin(freq, 125.0, 9, 5, 0x12, 22, 8);
         if(state != RADIOLIB_ERR_NONE) return false;
         
+#if !defined(BOARD_SENSECAP_T1000)
         radio->setDio2AsRfSwitch(true);
+#endif
         radio->setCRC(true);
         return true;
     }

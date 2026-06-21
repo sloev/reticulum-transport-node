@@ -5,7 +5,11 @@
 #include "Reti.h"
 
 // Hardware
-SX1262 radio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
+#if defined(BOARD_SENSECAP_T1000)
+Reticulum::RadioType radio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
+#else
+Reticulum::RadioType radio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
+#endif
 
 // Stack
 Reticulum::Identity* id;
@@ -16,8 +20,10 @@ Reticulum::Router* router;
 Reticulum::LoRaInterface* lora;
 Reticulum::SerialInterface* usb;
 Reticulum::BLEInterface* ble;
+#if !defined(BOARD_SENSECAP_T1000)
 Reticulum::WiFiDriver* wifi;
 Reticulum::ESPNowInterface* espnow;
+#endif
 
 void IRAM_ATTR isr_lora() { if(lora) lora->setFlag(); }
 
@@ -40,16 +46,20 @@ void setup() {
     ble = new Reticulum::BLEInterface(); ble->begin();
     
     // 3. Network Drivers (WiFi + ESP-NOW)
+#if !defined(BOARD_SENSECAP_T1000)
     wifi = new Reticulum::WiFiDriver(); wifi->begin(config);
     espnow = new Reticulum::ESPNowInterface(); espnow->begin();
+#endif
 
     // 4. Routing
     router = new Reticulum::Router(id);
     router->addInterface(lora);
     router->addInterface(usb);
     router->addInterface(ble);
+#if !defined(BOARD_SENSECAP_T1000)
     router->addInterface(wifi);
     router->addInterface(espnow);
+#endif
     
     router->storage.begin();
     router->sendAnnounce();
@@ -60,6 +70,8 @@ void setup() {
 void loop() {
     lora->handle();
     usb->loop();
+#if !defined(BOARD_SENSECAP_T1000)
     wifi->loop();
+#endif
     router->loop();
 }
