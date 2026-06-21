@@ -31,7 +31,7 @@ public:
 
         // 1. AES-128-CBC
         std::vector<uint8_t> iv(16);
-        for(int i=0; i<16; i++) iv[i] = (uint8_t)esp_random();
+        for(int i=0; i<16; i++) iv[i] = (uint8_t)RETI_RANDOM();
 
         std::vector<uint8_t> pt = {context};
         pt.insert(pt.end(), payload.begin(), payload.end());

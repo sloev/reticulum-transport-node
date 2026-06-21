@@ -29,7 +29,7 @@ public:
 
         // RNode Physical Fragmentation (Seq | Flag)
         // Flag=1 denotes a split fragment. Both frames carry Flag=1.
-        uint8_t seq = esp_random() & 0x0F;
+        uint8_t seq = RETI_RANDOM() & 0x0F;
         size_t split_idx = mtu - 1; 
 
         // Frame A

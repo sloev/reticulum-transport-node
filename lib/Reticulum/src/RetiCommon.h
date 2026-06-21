@@ -10,6 +10,12 @@
     #define RNS_ERR(...)
 #endif
 
+#if defined(BOARD_SENSECAP_T1000)
+    #define RETI_RANDOM() random(256)
+#else
+    #define RETI_RANDOM() esp_random()
+#endif
+
 namespace Reticulum {
 
 // Fixed-size Packet Buffer to avoid Heap Fragmentation

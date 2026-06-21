@@ -20,7 +20,7 @@ public:
             RNS_LOG("Identity Loaded.");
         } else {
             seed.resize(32);
-            for(int i=0; i<32; i++) seed[i] = (uint8_t)esp_random();
+            for(int i=0; i<32; i++) seed[i] = (uint8_t)RETI_RANDOM();
             File f = LittleFS.open("/id.key", "w");
             f.write(seed.data(), 32);
             f.close();

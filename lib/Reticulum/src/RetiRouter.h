@@ -59,7 +59,11 @@ public:
         Packet p; p.type=ANNOUNCE; p.destType=PLAIN;
         p.data = id->getPublicKey();
         // Add random bloom noise
+#if defined(BOARD_SENSECAP_T1000)
+        for(int i=0;i<10;i++) p.data.push_back((uint8_t)random(256));
+#else
         for(int i=0;i<10;i++) p.data.push_back((uint8_t)esp_random());
+#endif
         
         std::vector<uint8_t> raw = p.serialize();
         for(auto* iface : interfaces) iface->send(raw);

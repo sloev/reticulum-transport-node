@@ -52,7 +52,7 @@ public:
 
     static void genKeys(std::vector<uint8_t>& pub, std::vector<uint8_t>& priv) {
         pub.resize(32); priv.resize(32);
-        for(int i=0; i<32; i++) priv[i] = (uint8_t)esp_random();
+        for(int i=0; i<32; i++) priv[i] = (uint8_t)RETI_RANDOM();
         
         // Monocypher v4 API (Local)
         crypto_x25519_public_key(pub.data(), priv.data());
