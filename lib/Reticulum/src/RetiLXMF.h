@@ -80,7 +80,7 @@ public:
                         RNS_LOG("LXMF: Decrypted Sync Request payload.");
                         // The payload contains the identity hash of the user requesting sync.
                         // We trigger the file stream here.
-                        handleSyncRequest(src, plain, link);
+                        handleSyncRequest(nullptr, plain, link);
                     }
                     return;
                 }
@@ -104,7 +104,7 @@ public:
             std::vector<uint8_t> msgHash = Crypto::sha256(p.data);
             String filename = "/lxmf/" + toHex(std::vector<uint8_t>(msgHash.begin(), msgHash.begin()+16)) + ".msg";
             
-            File f = LittleFS.open(filename, "w");
+            auto f = LittleFS.open(filename, "w");
             if (f) {
                 f.write(rawPacket.data(), rawPacket.size());
                 f.close();
@@ -116,10 +116,10 @@ public:
     void handleSyncRequest(Interface* srcIface, const std::vector<uint8_t>& userHash, Link* link) {
         RNS_LOG("LXMF: Sync Request triggered for identity.");
         
-        File root = LittleFS.open("/lxmf");
+        auto root = LittleFS.open("/lxmf");
         if (!root || !root.isDirectory()) return;
 
-        File file = root.openNextFile();
+        auto file = root.openNextFile();
         while (file) {
             if (!file.isDirectory()) {
                 RNS_LOG("LXMF: Syncing %s", file.name());
