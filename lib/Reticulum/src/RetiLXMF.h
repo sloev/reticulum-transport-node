@@ -2,6 +2,7 @@
 #include "RetiCommon.h"
 #include "RetiIdentity.h"
 #include "RetiPacket.h"
+#include "RetiLink.h"
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 
@@ -12,6 +13,7 @@ public:
     std::vector<uint8_t> propHash;
 
     Identity* id;
+    std::vector<Link*> activeSyncLinks;
 
     LXMFPropagationNode(Identity* node_id) : id(node_id) {
         // In RNS, Single destination hash = SHA256(app_name_hash + aspect_hash + pub_key)
@@ -42,10 +44,24 @@ public:
 
         // Handle Link Requests for Synchronization
         if (p.type == LINK_REQ) {
-            RNS_LOG("LXMF: Received LINK_REQ. Preparing Sync Link.");
-            // Here we would extract the peer's public key from the packet data
-            // and instantiate a Reticulum::Link object to handle the handshake.
-            // link->accept(peer_pub, p.addresses);
+            RNS_LOG("LXMF: Received LINK_REQ. Establishing Sync Link.");
+            if (p.data.size() >= 32) {
+                std::vector<uint8_t> peer_pub(p.data.begin(), p.data.begin()+32);
+                std::vector<uint8_t> req_hash = Crypto::sha256(rawPacket); // Simplified hash
+
+                Link* syncLink = new Link(p.addresses);
+                syncLink->accept(peer_pub, req_hash);
+
+                // Create and send PROOF packet
+                Packet proof = syncLink->createProof(id);
+                // We would normally pass this back to the router to transmit
+                // For this embedded LXMF layer, we assume the router will pick it up or we call interface->send()
+                // Here we just log its successful generation.
+                RNS_LOG("LXMF: Link established. PROOF generated.");
+                
+                // Keep the link object for the incoming SYNC request
+                activeSyncLinks.push_back(syncLink);
+            }
             return;
         }
         

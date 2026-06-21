@@ -1,6 +1,7 @@
 #pragma once
 #include "RetiCrypto.h"
 #include "RetiPacket.h"
+#include "RetiIdentity.h"
 #include <time.h>
 
 namespace Reticulum {
@@ -24,6 +25,23 @@ public:
         enc_key.assign(derived.begin(), derived.begin()+32);
         auth_key.assign(derived.begin()+32, derived.end());
         active = true;
+    }
+
+    Packet createProof(Identity* id) {
+        Packet p;
+        if(!active) return p;
+        p.type = PROOF;
+        p.destType = LINK;
+        p.addresses.assign(req_hash.begin(), req_hash.begin()+16); // Link ID
+        
+        // Payload is the signature of the link request hash
+        // We append our ephemeral public key to the payload so the client can derive the symmetric key
+        std::vector<uint8_t> payload = my_pub;
+        std::vector<uint8_t> sig = id->sign(req_hash);
+        payload.insert(payload.end(), sig.begin(), sig.end());
+        
+        p.data = payload;
+        return p;
     }
 
     Packet encrypt(std::vector<uint8_t> payload, uint8_t context=0) {
