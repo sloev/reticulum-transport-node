@@ -27,32 +27,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install platformio
 
-      - name: Compile & Merge
-        run: pio run
+      - name: Compile ESP32
+        run: pio run -e heltec_wifi_lora_32_V3
         
+      - name: Compile SenseCAP T1000-E
+        run: pio run -e sensecap_t1000
+
       - name: Verify & Checksum
         id: verify
         run: |
-          BUILD_PATH=".pio/build/heltec_wifi_lora_32_V3/firmware_merged.bin"
-          if [ -f "$BUILD_PATH" ]; then
-            echo "::notice::Binary build successful"
+          BUILD_PATH_ESP=".pio/build/heltec_wifi_lora_32_V3/firmware_merged.bin"
+          BUILD_PATH_NRF=".pio/build/sensecap_t1000/firmware.uf2"
+          
+          if [ -f "$BUILD_PATH_ESP" ] && [ -f "$BUILD_PATH_NRF" ]; then
+            echo "::notice::Binary builds successful"
             # Calculate SHA256 for security verification
-            sha256sum "$BUILD_PATH" > firmware_merged.sha256
+            sha256sum "$BUILD_PATH_ESP" > firmware_esp32.sha256
+            sha256sum "$BUILD_PATH_NRF" > firmware_t1000e.sha256
             
-            echo "firmware_path=$BUILD_PATH" >> $GITHUB_OUTPUT
-            echo "checksum_path=firmware_merged.sha256" >> $GITHUB_OUTPUT
+            echo "esp_path=$BUILD_PATH_ESP" >> $GITHUB_OUTPUT
+            echo "nrf_path=$BUILD_PATH_NRF" >> $GITHUB_OUTPUT
+            echo "esp_hash=firmware_esp32.sha256" >> $GITHUB_OUTPUT
+            echo "nrf_hash=firmware_t1000e.sha256" >> $GITHUB_OUTPUT
           else
-            echo "::error::Merged binary not found! Check merge_bin.py"
+            echo "::error::Binaries not found!"
             exit 1
           fi
 
-      - name: Upload Artifact
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: firmware_merged.bin
+          name: firmwares
           path: |
-            ${{ steps.verify.outputs.firmware_path }}
-            ${{ steps.verify.outputs.checksum_path }}
+            ${{ steps.verify.outputs.esp_path }}
+            ${{ steps.verify.outputs.nrf_path }}
+            ${{ steps.verify.outputs.esp_hash }}
+            ${{ steps.verify.outputs.nrf_hash }}
 
   release:
     name: Create Release
@@ -64,15 +74,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Download Firmware
+      - name: Download Firmwares
         uses: actions/download-artifact@v4
         with:
-          name: firmware_merged.bin
+          name: firmwares
 
       - name: Generate Release Tag
         id: tag
         run: |
-          # Generates a version like v0.2.45 based on the run number
           echo "release_tag=v0.2.${{ github.run_number }}" >> $GITHUB_OUTPUT
 
       - name: Create Release
@@ -82,16 +91,20 @@ jobs:
           name: RNS-C Firmware ${{ steps.tag.outputs.release_tag }}
           files: |
              firmware_merged.bin
-             firmware_merged.sha256
+             firmware.uf2
+             firmware_esp32.sha256
+             firmware_t1000e.sha256
           generate_release_notes: true
           body: |
             ## 🚀 New Build
             **Commit:** ${{ github.sha }}
             
-            ### 🔒 Verification
-            SHA256 Checksum provided in `firmware_merged.sha256`.
-            
-            ### 📦 Installation
+            ### 📦 SenseCAP T1000-E Installation
+            1. Download `firmware.uf2`
+            2. Double tap the reset button to mount the `T1000EBOOT` drive.
+            3. Drag and drop `firmware.uf2` into the drive.
+
+            ### 📦 ESP32 Heltec V3 Installation
             1. Download `firmware_merged.bin`
             2. Go to [Espressif Web Tool](https://espressif.github.io/esptool-js/)
             3. Connect Device
