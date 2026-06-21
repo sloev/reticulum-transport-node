@@ -35,26 +35,38 @@ public:
         }
         if(!match) return;
 
-        RNS_LOG("LXMF: Intercepted propagation packet.");
-
-        // Extract MsgPack Payload
-        DynamicJsonDocument doc(1024);
-        DeserializationError err = deserializeMsgPack(doc, p.data.data(), p.data.size());
-        
-        if (err) {
-            RNS_ERR("LXMF: MsgPack parse failed.");
+        // Handle Link Requests for Synchronization
+        if (p.type == LINK_REQ) {
+            RNS_LOG("LXMF: Received LINK_REQ. Preparing Sync Link.");
+            // Here we would extract the peer's public key from the packet data
+            // and instantiate a Reticulum::Link object to handle the handshake.
+            // link->accept(peer_pub, p.addresses);
             return;
         }
-
-        // Write to LittleFS using message hash as filename
-        std::vector<uint8_t> msgHash = Crypto::sha256(p.data);
-        String filename = "/lxmf/" + toHex(std::vector<uint8_t>(msgHash.begin(), msgHash.begin()+16)) + ".msg";
         
-        File f = LittleFS.open(filename, "w");
-        if (f) {
-            f.write(rawPacket.data(), rawPacket.size());
-            f.close();
-            RNS_LOG("LXMF: Cached message to %s", filename.c_str());
+        // Handle incoming LXMF Data (Caching)
+        if (p.type == DATA) {
+            RNS_LOG("LXMF: Intercepted propagation packet for caching.");
+
+            // Extract MsgPack Payload
+            DynamicJsonDocument doc(1024);
+            DeserializationError err = deserializeMsgPack(doc, p.data.data(), p.data.size());
+            
+            if (err) {
+                RNS_ERR("LXMF: MsgPack parse failed.");
+                return;
+            }
+
+            // Write to LittleFS using message hash as filename
+            std::vector<uint8_t> msgHash = Crypto::sha256(p.data);
+            String filename = "/lxmf/" + toHex(std::vector<uint8_t>(msgHash.begin(), msgHash.begin()+16)) + ".msg";
+            
+            File f = LittleFS.open(filename, "w");
+            if (f) {
+                f.write(rawPacket.data(), rawPacket.size());
+                f.close();
+                RNS_LOG("LXMF: Cached message to %s", filename.c_str());
+            }
         }
     }
 
