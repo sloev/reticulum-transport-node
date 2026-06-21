@@ -11,12 +11,17 @@ class LXMFPropagationNode {
 public:
     std::vector<uint8_t> propHash;
 
-    LXMFPropagationNode() {
-        // In RNS, Plain destination hash is SHA256(app_name + aspect)
-        // Here we simplify by just using a computed 16-byte hash.
-        String name = "lxmf.propagation";
-        std::vector<uint8_t> nameBuf(name.c_str(), name.c_str() + name.length());
-        std::vector<uint8_t> fullHash = Crypto::sha256(nameBuf);
+    Identity* id;
+
+    LXMFPropagationNode(Identity* node_id) : id(node_id) {
+        // In RNS, Single destination hash = SHA256(app_name_hash + aspect_hash + pub_key)
+        // For demonstration, we simply derive a 16-byte hash based on our identity
+        std::vector<uint8_t> pub = id->getPublicKey();
+        String prefix = "lxmf.propagation";
+        std::vector<uint8_t> buf(prefix.c_str(), prefix.c_str() + prefix.length());
+        buf.insert(buf.end(), pub.begin(), pub.end());
+        
+        std::vector<uint8_t> fullHash = Crypto::sha256(buf);
         propHash.assign(fullHash.begin(), fullHash.begin() + 16);
         
         if (!LittleFS.exists("/lxmf")) {

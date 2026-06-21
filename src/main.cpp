@@ -64,7 +64,7 @@ void setup() {
     router->storage.begin();
     
     // 5. Application Layer (LXMF)
-    Reticulum::LXMFPropagationNode* lxmfNode = new Reticulum::LXMFPropagationNode();
+    Reticulum::LXMFPropagationNode* lxmfNode = new Reticulum::LXMFPropagationNode(id);
     router->onLocalDelivery = [lxmfNode](const std::vector<uint8_t>& raw, const Reticulum::Packet& p, Reticulum::Interface* src) {
         lxmfNode->handleIncoming(raw, p);
     };
