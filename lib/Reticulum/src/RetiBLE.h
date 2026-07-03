@@ -1,13 +1,70 @@
 #pragma once
-#include <NimBLEDevice.h>
 #include "RetiInterface.h"
+
+#if defined(BOARD_SENSECAP_T1000)
+// NimBLE-Arduino targets ESP32; the Adafruit nRF52 core brings its own
+// Bluefruit BLE stack (with the softdevice), so we drive that instead.
+#include <bluefruit.h>
+
+namespace Reticulum {
+
+class BLEInterface : public Interface {
+    BLEUart bleuart;
+    bool connected = false;
+    std::vector<uint8_t> buf;
+
+public:
+    BLEInterface() : Interface("BLE", 500) {}
+
+    void begin() {
+        Bluefruit.begin();
+        Bluefruit.setName("RNS Node");
+
+        bleuart.begin();
+
+        Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+        Bluefruit.Advertising.addTxPower();
+        Bluefruit.Advertising.addService(bleuart);
+        Bluefruit.Advertising.addName();
+        Bluefruit.Advertising.restartOnDisconnect(true);
+        Bluefruit.Advertising.setInterval(32, 244);
+        Bluefruit.Advertising.setFastTimeout(30);
+        Bluefruit.Advertising.start(0);
+    }
+
+    void loop() {
+        connected = Bluefruit.connected();
+        if(!connected) return;
+
+        while(bleuart.available()) {
+            uint8_t b = bleuart.read();
+            if(b==0xC0) { if(buf.size()>0) receive(buf); buf.clear(); }
+            else buf.push_back(b);
+        }
+    }
+
+    void sendRaw(const std::vector<uint8_t>& d) override {
+        if(!connected) return;
+        std::vector<uint8_t> k = {0xC0};
+        for(uint8_t b:d) { if(b==0xC0){k.push_back(0xDB);k.push_back(0xDC);} else k.push_back(b); }
+        k.push_back(0xC0);
+        for(size_t i=0; i<k.size(); i+=20) {
+            bleuart.write(k.data()+i, min((size_t)20, k.size()-i));
+            delay(5);
+        }
+    }
+};
+}
+
+#else
+#include <NimBLEDevice.h>
 
 namespace Reticulum {
 
 class BLEInterface : public Interface, public NimBLEServerCallbacks, public NimBLECharacteristicCallbacks {
     NimBLECharacteristic *pTx, *pRx;
     bool connected = false;
-    std::vector<uint8_t> buf; 
+    std::vector<uint8_t> buf;
     bool esc=false;
 
 public:
@@ -31,7 +88,7 @@ public:
         std::string v = pC->getValue();
         for(char c : v) {
             uint8_t b = (uint8_t)c;
-            if(b==0xC0) { if(buf.size()>0) receive(buf); buf.clear(); esc=false; } 
+            if(b==0xC0) { if(buf.size()>0) receive(buf); buf.clear(); esc=false; }
             else buf.push_back(b);
         }
     }
@@ -48,3 +105,4 @@ public:
     }
 };
 }
+#endif
