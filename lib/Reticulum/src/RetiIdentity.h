@@ -1,6 +1,5 @@
 #pragma once
 #include "RetiCrypto.h"
-#include <LittleFS.h>
 
 namespace Reticulum {
 class Identity {
@@ -13,7 +12,11 @@ private:
 public:
     Identity() {
         if(LittleFS.exists("/id.key")) {
+#if defined(BOARD_SENSECAP_T1000)
+            File f(LittleFS.open("/id.key", FILE_O_READ));
+#else
             File f = LittleFS.open("/id.key", "r");
+#endif
             seed.resize(32);
             f.read(seed.data(), 32);
             f.close();
@@ -21,7 +24,11 @@ public:
         } else {
             seed.resize(32);
             for(int i=0; i<32; i++) seed[i] = (uint8_t)RETI_RANDOM();
+#if defined(BOARD_SENSECAP_T1000)
+            File f(LittleFS.open("/id.key", FILE_O_WRITE));
+#else
             File f = LittleFS.open("/id.key", "w");
+#endif
             f.write(seed.data(), 32);
             f.close();
             RNS_LOG("New Identity Generated.");

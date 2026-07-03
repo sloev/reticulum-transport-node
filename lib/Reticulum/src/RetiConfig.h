@@ -1,6 +1,5 @@
 #pragma once
-#include <Arduino.h>
-#include <LittleFS.h>
+#include "RetiCommon.h"
 #include <ArduinoJson.h>
 #include <vector>
 
@@ -8,10 +7,14 @@ namespace Reticulum {
 struct WiFiCred { String ssid; String pass; };
 struct Config {
     float loraFreq = 915.0;
-    std::vector<WiFiCred> networks; 
+    std::vector<WiFiCred> networks;
     void load() {
         if (!LittleFS.exists("/config.json")) { save(); return; }
+#if defined(BOARD_SENSECAP_T1000)
+        File f(LittleFS.open("/config.json", FILE_O_READ));
+#else
         File f = LittleFS.open("/config.json", "r");
+#endif
         DynamicJsonDocument doc(2048);
         deserializeJson(doc, f);
         f.close();
@@ -30,7 +33,11 @@ struct Config {
         for (const auto& c : networks) {
             JsonObject n = nets.createNestedObject(); n["ssid"] = c.ssid; n["pass"] = c.pass;
         }
+#if defined(BOARD_SENSECAP_T1000)
+        File f(LittleFS.open("/config.json", FILE_O_WRITE));
+#else
         File f = LittleFS.open("/config.json", "w");
+#endif
         serializeJson(doc, f);
         f.close();
     }

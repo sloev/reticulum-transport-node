@@ -12,8 +12,24 @@
 
 #if defined(BOARD_SENSECAP_T1000)
     #define RETI_RANDOM() random(256)
+
+    // nRF52840 (Adafruit core): the ESP32-only IRAM_ATTR is undefined here.
+    #if !defined(IRAM_ATTR)
+        #define IRAM_ATTR
+    #endif
+
+    // nRF52840 (Adafruit core) ships its own LittleFS wrapper with a
+    // different API shape (File open-mode flags, no formatOnFail argument)
+    // instead of the ESP32 LittleFS library.
+    #include <Adafruit_LittleFS.h>
+    #include <InternalFileSystem.h>
+    #define LittleFS InternalFS
+    using namespace Adafruit_LittleFS_Namespace;
+    #define RETI_FS_BEGIN() LittleFS.begin()
 #else
     #define RETI_RANDOM() esp_random()
+    #include <LittleFS.h>
+    #define RETI_FS_BEGIN() LittleFS.begin(true)
 #endif
 
 namespace Reticulum {

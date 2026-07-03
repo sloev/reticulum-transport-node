@@ -4,7 +4,6 @@
 #include "RetiPacket.h"
 #include "RetiLink.h"
 #include <ArduinoJson.h>
-#include <LittleFS.h>
 
 namespace Reticulum {
 
@@ -103,8 +102,12 @@ public:
             // Write to LittleFS using message hash as filename
             std::vector<uint8_t> msgHash = Crypto::sha256(p.data);
             String filename = "/lxmf/" + toHex(std::vector<uint8_t>(msgHash.begin(), msgHash.begin()+16)) + ".msg";
-            
-            auto f = LittleFS.open(filename, "w");
+
+#if defined(BOARD_SENSECAP_T1000)
+            File f(LittleFS.open(filename.c_str(), FILE_O_WRITE));
+#else
+            File f = LittleFS.open(filename, "w");
+#endif
             if (f) {
                 f.write(rawPacket.data(), rawPacket.size());
                 f.close();
@@ -115,11 +118,16 @@ public:
 
     void handleSyncRequest(Interface* srcIface, const std::vector<uint8_t>& userHash, Link* link) {
         RNS_LOG("LXMF: Sync Request triggered for identity.");
-        
-        auto root = LittleFS.open("/lxmf");
-        if (!root || !root.isDirectory()) return;
 
-        auto file = root.openNextFile();
+#if defined(BOARD_SENSECAP_T1000)
+        File root(LittleFS.open("/lxmf", FILE_O_READ));
+        if (!root || !root.isDirectory()) return;
+        File file = root.openNextFile(FILE_O_READ);
+#else
+        File root = LittleFS.open("/lxmf");
+        if (!root || !root.isDirectory()) return;
+        File file = root.openNextFile();
+#endif
         while (file) {
             if (!file.isDirectory()) {
                 RNS_LOG("LXMF: Syncing %s", file.name());
@@ -136,7 +144,11 @@ public:
                     // srcIface->send(p.serialize());
                 }
             }
+#if defined(BOARD_SENSECAP_T1000)
+            file = root.openNextFile(FILE_O_READ);
+#else
             file = root.openNextFile();
+#endif
         }
     }
 };

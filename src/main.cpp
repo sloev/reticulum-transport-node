@@ -1,8 +1,7 @@
 #include <Arduino.h>
 #include <RadioLib.h>
-#include <LittleFS.h>
 #include "BoardConfig.h"
-#include "Reti.h"
+#include "Reti.h" // pulls in the right LittleFS/InternalFS via RetiCommon.h
 
 // Hardware
 #if defined(BOARD_SENSECAP_T1000)
@@ -30,14 +29,18 @@ void IRAM_ATTR isr_lora() { if(lora) lora->setFlag(); }
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    LittleFS.begin(true);
+    RETI_FS_BEGIN();
     config.load();
 
     // 1. Core
     id = new Reticulum::Identity();
-    
+
     // 2. Hardware Drivers
+#if defined(BOARD_SENSECAP_T1000)
+    SPI.begin();
+#else
     SPI.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_NSS);
+#endif
     lora = new Reticulum::LoRaInterface(&radio);
     if(!lora->begin(config.loraFreq)) while(1);
     lora->start(isr_lora);
@@ -77,7 +80,9 @@ void setup() {
 void loop() {
     lora->handle();
     usb->loop();
-#if !defined(BOARD_SENSECAP_T1000)
+#if defined(BOARD_SENSECAP_T1000)
+    ble->loop();
+#else
     wifi->loop();
 #endif
     router->loop();

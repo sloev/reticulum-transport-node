@@ -1,6 +1,5 @@
 #pragma once
 #include "RetiCommon.h"
-#include <LittleFS.h>
 #include <list>
 
 namespace Reticulum {
@@ -15,9 +14,9 @@ struct CachedMsg {
 class Storage {
     std::list<CachedMsg> cache;
     const size_t MAX_CACHE = 15;
-    
+
 public:
-    void begin() { LittleFS.begin(true); if(!LittleFS.exists("/msg")) LittleFS.mkdir("/msg"); }
+    void begin() { RETI_FS_BEGIN(); if(!LittleFS.exists("/msg")) LittleFS.mkdir("/msg"); }
 
     void store(const String& dest, const std::vector<uint8_t>& pkt) {
         if(cache.size() >= MAX_CACHE) flushOne();
@@ -27,7 +26,7 @@ public:
 
     std::vector<std::vector<uint8_t>> retrieve(const String& dest) {
         std::vector<std::vector<uint8_t>> res;
-        
+
         // 1. RAM
         auto it = cache.begin();
         while(it != cache.end()) {
@@ -38,18 +37,31 @@ public:
         }
 
         // 2. Disk
+#if defined(BOARD_SENSECAP_T1000)
+        File root(LittleFS.open("/msg", FILE_O_READ));
+        File f = root.openNextFile(FILE_O_READ);
+#else
         File root = LittleFS.open("/msg");
         File f = root.openNextFile();
+#endif
         while(f) {
             String name = f.name();
-            if(name.startsWith(dest)) { 
+            if(name.startsWith(dest)) {
                 size_t sz = f.size();
                 std::vector<uint8_t> buf(sz);
                 f.read(buf.data(), sz);
                 res.push_back(buf);
+#if defined(BOARD_SENSECAP_T1000)
+                LittleFS.remove((String("/msg/")+name).c_str());
+#else
                 LittleFS.remove(String("/msg/")+name);
+#endif
             }
+#if defined(BOARD_SENSECAP_T1000)
+            f = root.openNextFile(FILE_O_READ);
+#else
             f = root.openNextFile();
+#endif
         }
         return res;
     }
@@ -58,14 +70,18 @@ public:
         for(auto& m : cache) {
             if(m.dirty) {
                 String path = "/msg/" + m.dest + "_" + String(millis());
+#if defined(BOARD_SENSECAP_T1000)
+                File f(LittleFS.open(path.c_str(), FILE_O_WRITE));
+#else
                 File f = LittleFS.open(path, "w");
+#endif
                 f.write(m.data.data(), m.data.size());
                 f.close();
                 m.dirty = false;
                 return;
             }
         }
-        cache.pop_front(); 
+        cache.pop_front();
     }
     
     void loop() {
