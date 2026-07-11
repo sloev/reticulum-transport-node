@@ -1,5 +1,13 @@
 #pragma once
-#include <Arduino.h>
+
+// RNSC_HOST_TEST builds the protocol/crypto layer as a native binary (see
+// test/host/) against ground-truth vectors generated from the real `rns`
+// package -- no board, no filesystem, no radio.
+#if defined(RNSC_HOST_TEST)
+    #include "ArduinoShim.h"
+#else
+    #include <Arduino.h>
+#endif
 #include <vector>
 
 #ifdef RNS_LOGGING_ENABLED
@@ -10,7 +18,10 @@
     #define RNS_ERR(...)
 #endif
 
-#if defined(BOARD_SENSECAP_T1000)
+#if defined(RNSC_HOST_TEST)
+    #define RETI_RANDOM() random(256)
+    #define IRAM_ATTR
+#elif defined(BOARD_SENSECAP_T1000)
     #define RETI_RANDOM() random(256)
 
     // nRF52840 (Adafruit core): the ESP32-only IRAM_ATTR is undefined here.

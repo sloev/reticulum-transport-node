@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  protocol-compliance:
+    name: Protocol Compliance (host tests)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install ground-truth Reticulum implementation
+        run: pip install rns==1.3.7
+
+      - name: Build and run host protocol/crypto tests
+        run: ./test/host/build.sh
+
   build:
     name: Compile Firmware
+    needs: protocol-compliance
     runs-on: ubuntu-latest
 
     steps:
