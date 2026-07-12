@@ -73,9 +73,11 @@ Said plainly, not buried:
 - No propagation-node-to-propagation-node sync (the `/offer` path). It
   serves clients directly; it doesn't gossip caches with other PNs.
 - No ratcheted announces.
-- No Resource *receive* path — it can send Resources but never has to
-  accept an inbound one, since LXMF deliveries arrive as plain packets,
-  not link uploads.
+- No Resource *receive* path. It can send Resources but not accept one —
+  and LXMF only sends a message as a single link packet if it's under
+  319 bytes; anything longer, or carrying an attachment, uploads as a
+  Resource instead. Short messages sync fine. Longer ones or anything
+  with an attachment will fail to upload until this is built.
 
 Full line-item ledger, with the RNS manual section each row maps to:
 `COMPLIANCE.md`.

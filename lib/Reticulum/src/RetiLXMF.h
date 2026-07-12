@@ -117,9 +117,10 @@ public:
             return;
         }
 
-        if (p.type == DATA) {
-            cacheIncomingMessage(p.data);
-        }
+        // Nothing else arrives addressed to the bare propagation
+        // destination: LXMRouter always uploads messages over an
+        // established Link (see handlePropagationUpload), never as a
+        // plain packet to the destination hash.
     }
 
     void loop() {
@@ -170,8 +171,43 @@ private:
                 std::vector<Packet> parts = kv.second->handleRequest(plaintext);
                 for (auto& part : parts) src->send(part.serialize());
             }
+        } else if (p.context == CTX_NONE) {
+            handlePropagationUpload(p, link, src);
         }
         // KEEPALIVE: link->touch() above already covers it, no reply needed.
+    }
+
+    // A message upload from a client: LXMessage.send() for method=PROPAGATED,
+    // representation=PACKET sends a plain (context NONE) Link-encrypted DATA
+    // packet whose plaintext is msgpack([timestamp, [lxmf_data, ...]]) --
+    // see LXMRouter.propagation_packet. Each lxmf_data entry is already
+    // dest_hash(16) || Identity.encrypt()'d-to-the-recipient bytes: this
+    // node stores it as-is (see cacheIncomingMessage) without decrypting it
+    // itself, since it's encrypted to the message's actual recipient, not
+    // to this node. On success, replies with a generic packet-delivery
+    // proof so the client's PacketReceipt resolves instead of timing out.
+    void handlePropagationUpload(const Packet& p, Link* link, Interface* src) {
+        std::vector<uint8_t> plaintext = link->decrypt(p.data);
+        if (plaintext.empty()) return;
+
+        cmp_ctx_t ctx;
+        MsgpackBuffer buf;
+        msgpackInitReader(&ctx, &buf, plaintext);
+        uint32_t arrLen = 0;
+        if (!cmp_read_array(&ctx, &arrLen) || arrLen < 2) return;
+
+        // [0]: remote timebase (float) -- not used, this node has no RTC.
+        cmp_object_t obj;
+        if (!cmp_read_object(&ctx, &obj)) return;
+
+        std::vector<std::vector<uint8_t>> messages;
+        bool wasNil = false;
+        if (!cmpReadOptionalBinArray(&ctx, messages, wasNil, 4096) || wasNil) return;
+
+        for (auto& lxmfData : messages) cacheIncomingMessage(lxmfData);
+
+        Packet proof = link->buildPacketProof(id, p);
+        src->send(proof.serialize());
     }
 
     // MESSAGE_GET ("/get"): data = [wants_or_nil, haves_or_nil]. [nil, nil]
@@ -231,13 +267,13 @@ private:
         return wbuf.out;
     }
 
-    // Caches an inbound propagation packet. `encryptedPayload` is the
-    // packet's data field: RNS.Identity.encrypt()'d to this node's own
-    // identity (the RNS-transport-layer wrapper -- separate from LXMF's own
-    // encryption of the message content to its *final* recipient, which
-    // this node cannot and does not decrypt).
-    void cacheIncomingMessage(const std::vector<uint8_t>& encryptedPayload) {
-        std::vector<uint8_t> lxmfData = id->decrypt(encryptedPayload);
+    // Caches one message extracted from an inbound propagation upload.
+    // `lxmfData` is dest_hash(16) || Identity.encrypt()'d-to-the-*recipient*
+    // bytes -- LXMF's own end-to-end encryption, addressed to whoever the
+    // message is actually for. This node never holds that recipient's
+    // private key, so it stores the blob opaquely rather than decrypting
+    // it (a propagation node is a courier, not a reader).
+    void cacheIncomingMessage(const std::vector<uint8_t>& lxmfData) {
         if (lxmfData.size() < LXMF_MIN_SIZE) return;
 
         std::vector<uint8_t> transientIdFull = Crypto::sha256(lxmfData);

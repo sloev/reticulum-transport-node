@@ -136,6 +136,30 @@ public:
         return p;
     }
 
+    // Builds a generic packet-delivery proof for an inbound DATA packet on
+    // this link (RNS.Link.prove_packet()): proof_data = full_hash(packet's
+    // hashable part, 32 bytes, untruncated) || sig(link_id owner's static
+    // identity signs that hash). Sent back as a PROOF packet addressed to
+    // this link, context NONE, *unencrypted* -- RNS.Packet.pack() special-
+    // cases "packet proofs over links are not encrypted". This is what a
+    // sender's PacketReceipt waits on to mark opportunistic/propagated
+    // delivery as complete; without it, a real LXMF client would see the
+    // send time out and retry even though this node already stored the
+    // message.
+    Packet buildPacketProof(Identity* id, const Packet& p) const {
+        std::vector<uint8_t> packetHash = Crypto::sha256(p.getHashablePart());
+        std::vector<uint8_t> sig = id->sign(packetHash);
+
+        Packet proof;
+        proof.type = PROOF;
+        proof.destType = LINK;
+        proof.addresses = linkId;
+        proof.context = CTX_NONE;
+        proof.data = packetHash;
+        proof.data.insert(proof.data.end(), sig.begin(), sig.end());
+        return proof;
+    }
+
     // Verifies an inbound LINKIDENTIFY packet (RNS.Link.identify()):
     // plaintext = pubkey(64) || sig(64), signed_data = link_id || pubkey.
     // On success, remoteIdentityHash is set to SHA256(pubkey)[:16].

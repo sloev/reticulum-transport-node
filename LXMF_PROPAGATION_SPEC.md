@@ -21,17 +21,24 @@ and broadcasts an announce on boot carrying the LXMF propagation-node
 stamp_cost, metadata]`) that Sideband and NomadNet check before listing an
 announce as a real PN, not just any destination.
 
-## Inbound message handling — done
+## Inbound message handling — done (single-packet uploads only)
 
-A message addressed to the propagation destination arrives as a plain
-packet (not a Link upload — LXMF deliveries to a PN don't go through the
-Resource protocol). The firmware:
+A client uploads a message over an established Link to the propagation
+destination, not as a plain packet addressed to the destination hash
+directly (an earlier draft of this firmware got that wrong — see the
+"messages sent to a plain destination-addressed packet" note below). This
+matches `LXMessage.send()`/`LXMRouter.propagation_packet`: for
+method=PROPAGATED, representation=PACKET, the client sends a plain
+(context NONE) Link-encrypted DATA packet on the link, whose plaintext is
+`msgpack([timestamp, [lxmf_data, ...]])`. The firmware:
 
-1. Decrypts the packet with the node's own identity (`Identity::decrypt`)
-   — this is the RNS-transport-layer wrapper, separate from and outside
-   LXMF's own end-to-end encryption of the message body to its actual
-   recipient, which this node never touches.
-2. Computes `transient_id = SHA256(lxmf_data)` (full 32 bytes, no
+1. Token-decrypts the packet with the link's own key (`Link::decrypt`,
+   the ordinary link encryption every packet on the link uses) and
+   msgpack-unpacks the `[timestamp, messages]` envelope.
+2. For each `lxmf_data` entry (already `dest_hash(16) ||
+   Identity.encrypt()`'d-to-the-*recipient*'s identity — LXMF's own
+   end-to-end layer, which this node never touches or decrypts):
+   computes `transient_id = SHA256(lxmf_data)` (full 32 bytes, no
    truncation) and skips it if already cached.
 3. Writes the raw bytes to `/lxmf/<64-hex-transient-id>.msg` and adds an
    entry to the in-RAM index (`destination_hash` = first 16 bytes of the
@@ -39,6 +46,16 @@ Resource protocol). The firmware:
    index survives a reset without re-hashing every stored file).
 4. Evicts the oldest entry if storage exceeds `MAX_STORED_MESSAGES` (40,
    a fixed cap — flash is small, and this isn't a general-purpose relay).
+5. Replies with a generic packet-delivery proof (`Link::buildPacketProof`)
+   so the sender's transfer resolves as delivered instead of timing out.
+
+**Size limit, stated plainly:** LXMF only uses the single-packet path
+above when the message content fits in 319 bytes
+(`LXMessage.LINK_PACKET_MAX_CONTENT`). Anything longer — or carrying an
+attachment — gets sent as a Resource upload instead, which this firmware
+can't accept (see `COMPLIANCE.md` section 7: send-only Resource support).
+Short text messages sync correctly; longer messages will fail to upload
+until Resource-receive is built.
 
 ## Sync protocol — done
 

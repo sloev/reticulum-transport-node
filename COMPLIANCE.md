@@ -67,6 +67,7 @@ implemented, because nothing here needs to open a link to another node.
 | LINKIDENTIFY | `pubkey(64) \|\| sig(link_id \|\| pubkey)`, Ed25519-verified against the announced-or-claimed pubkey | `Link::handleIdentify` | **verified** |
 | LINKCLOSE | sets link to closed, torn down on next `Router`/`LXMFPropagationNode::loop()` pass | `Link::handleClose` | manual review |
 | Keepalive / staleness | inbound traffic refreshes `lastInbound`; link considered stale after 300s idle | `Link::touch`/`isStale` | manual review |
+| Packet-delivery proof | `full_hash(packet's hashable part, 32B) \|\| sig`, signed with the link owner's static identity key, unencrypted, PROOF type addressed to the link — what a sender's `PacketReceipt` waits on before marking a link-delivered packet (e.g. a propagation upload) as delivered instead of timing out | `Link::buildPacketProof` | **verified** (structure and self-consistency checked in `test_lxmf_compile.cpp`, not against a live RNS receipt) |
 
 ## 6. Request / Response
 
@@ -78,10 +79,17 @@ implemented, because nothing here needs to open a link to another node.
 
 ## 7. Resource
 
-Send side only. This firmware never needs to receive a Resource: inbound
-LXMF propagation deliveries arrive as plain single packets addressed to
-the propagation destination, and this device never issues outbound
-requests large enough to draw a Resource-sized response back.
+Send side only — this firmware never accepts an inbound Resource. That's
+a real, user-visible limit, not just an internal one: LXMF only sends a
+message as a single link packet if its content fits in 319 bytes
+(`LXMessage.LINK_PACKET_MAX_CONTENT` with default RNS/LXMF parameters) —
+anything longer, or carrying an attachment, gets sent as a Resource
+upload instead, which this node has no way to receive. In practice: short
+text messages sync fine; longer messages or anything with an attachment
+sent *to* this node's propagation cache will fail to upload (the sender's
+transfer will stall/time out). This firmware also never issues outbound
+requests large enough to draw a Resource-sized response back, which is
+why the send side alone has been sufficient so far.
 
 | Component | RNS requirement | Implementation | Status |
 |---|---|---|---|
@@ -98,7 +106,9 @@ requests large enough to draw a Resource-sized response back.
 |---|---|---|---|
 | Destination | `lxmf.propagation` name hash, `dest_hash = SHA256(name_hash \|\| identity_hash)[:16]` | `LXMFPropagationNode` constructor | **verified** |
 | Announce app_data | `[legacy_pn, timebase, hosting, per_transfer_kb, per_sync_kb, [stamp_cost×3], metadata]`, the shape Sideband/NomadNet check before treating an announce as a real PN | `buildAnnounceAppData` | manual review (shape matches `LXMRouter.get_propagation_node_app_data`; no RTC on-device so `timebase` is uptime, not wall clock) |
-| Inbound caching | store the encrypted LXMF blob keyed by `SHA256(lxmf_data)` (full 32-byte hash, no truncation), destination hash read from the first 16 bytes | `cacheIncomingMessage` | **verified** (smoke-tested against a synthetic encrypted message) |
+| Upload transport | a client sends `msgpack([timestamp, [lxmf_data, ...]])` as a plain (context NONE) Link-encrypted DATA packet over an established Link to the propagation destination — *not* a bare packet addressed to the destination hash — matching `LXMessage.__as_packet()`/`LXMRouter.propagation_packet` for method=PROPAGATED, representation=PACKET | `handlePropagationUpload` (dispatched from `handleLinkPacket` on context NONE) | **verified** (structure checked against LXMF source and driven end-to-end in `test_lxmf_compile.cpp` using a real link) |
+| Upload acknowledgement | reply with a packet-delivery proof so the sender's `PacketReceipt` resolves instead of timing out and retrying | `Link::buildPacketProof`, sent from `handlePropagationUpload` | **verified** |
+| Inbound caching | each `lxmf_data` entry (`dest_hash(16) \|\| Identity.encrypt()'d-to-the-recipient bytes` — already end-to-end encrypted to whoever the message is for, never decrypted by this node) stored keyed by `SHA256(lxmf_data)` (full 32-byte hash, no truncation), destination hash read from the first 16 bytes | `cacheIncomingMessage` | **verified** |
 | `MESSAGE_GET` — list | `data=[nil, nil]` → transient IDs + sizes for the identified client's delivery hash | `handleMessageGet` | manual review |
 | `MESSAGE_GET` — want/have | purge `haves`, stream `wants` within a per-call byte budget | `handleMessageGet` | manual review |
 | Link identification required | an unidentified link can't be attributed to a delivery hash, so it gets nothing | `handleMessageGet` early return | **verified** |
