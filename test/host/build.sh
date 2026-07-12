@@ -23,6 +23,7 @@ CXX="${CXX:-g++}"
     "$ROOT/lib/Monocypher/monocypher-ed25519.c" \
     "$ROOT/lib/Reticulum/src/sha256.cpp" \
     "$ROOT/lib/TinyAES/aes.c" \
+    "$ROOT/lib/cmp/cmp.c" \
     -o rnsc_host_tests
 
 ./rnsc_host_tests

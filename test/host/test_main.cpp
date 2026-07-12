@@ -19,6 +19,9 @@
 #include "RetiPacket.h"
 #include "RetiAnnounce.h"
 #include "RetiLink.h"
+#include "RetiMsgpack.h"
+#include "RetiRequest.h"
+#include "RetiResource.h"
 
 #include <cstdio>
 
@@ -223,6 +226,114 @@ static void test_link_accept_and_proof() {
     check(ok == 0, "proof signature self-verifies against the server identity");
 }
 
+static void test_request_envelope_parse() {
+    std::printf("test_request_envelope_parse\n");
+    auto plaintext = hexToBytes(TestVectors::REQUEST_PLAINTEXT_HEX);
+
+    RequestEnvelope env;
+    bool ok = Request::parseEnvelope(plaintext, env);
+    check(ok, "Request::parseEnvelope succeeds on a real RNS request plaintext");
+    checkHexEq(env.pathHash, TestVectors::REQUEST_PATH_HASH_HEX, "parsed path_hash matches RNS");
+    check(env.timestamp == TestVectors::REQUEST_TIMESTAMP, "parsed timestamp matches RNS");
+
+    auto pathHash = Request::pathHash(TestVectors::REQUEST_PATH);
+    checkHexEq(pathHash, TestVectors::REQUEST_PATH_HASH_HEX, "Request::pathHash matches RNS.Identity.truncated_hash(path)");
+}
+
+static void test_resource_hash_orderings() {
+    std::printf("test_resource_hash_orderings\n");
+    auto data = hexToBytes(TestVectors::RESOURCE_DATA_HEX);
+    auto randomHash = hexToBytes(TestVectors::RESOURCE_RANDOM_HASH_HEX);
+    auto chunk = hexToBytes(TestVectors::RESOURCE_CHUNK_HEX);
+
+    // resource hash = full_hash(data || random_hash) -- data first.
+    std::vector<uint8_t> hashInput = data;
+    hashInput.insert(hashInput.end(), randomHash.begin(), randomHash.end());
+    checkHexEq(Crypto::sha256(hashInput), TestVectors::RESOURCE_HASH_HEX, "resource hash ordering (data || random_hash)");
+
+    // encrypted payload = random_hash || data -- random_hash first.
+    std::vector<uint8_t> payload = randomHash;
+    payload.insert(payload.end(), data.begin(), data.end());
+    checkHexEq(payload, TestVectors::RESOURCE_PAYLOAD_TO_ENCRYPT_HEX, "encrypted payload ordering (random_hash || data)");
+
+    // map_hash = full_hash(chunk || random_hash)[:4] -- chunk first.
+    auto mh = Resource::mapHash(chunk, randomHash);
+    checkHexEq(mh, TestVectors::RESOURCE_MAP_HASH_HEX, "Resource::mapHash ordering (chunk || random_hash)");
+}
+
+static void test_resource_advertisement_self_consistency() {
+    // No live RNS-generated Resource vector (would need a timing-sensitive
+    // simulated transfer, see test/vectors/make_vectors.py comments) --
+    // real cross-implementation validation of the advertisement happens in
+    // the Stage 7 live interop test. This checks internal self-consistency:
+    // building a resource and re-reading its own advertisement back out.
+    std::printf("test_resource_advertisement_self_consistency\n");
+
+    Packet lr = Packet::parse(hexToBytes(TestVectors::LINK_RAW_LR_PACKET_HEX));
+    Link* link = Link::accept(lr);
+    check(link != nullptr, "Link::accept succeeds");
+    if (!link) return;
+
+    std::vector<uint8_t> data(1000);
+    for (size_t i = 0; i < data.size(); i++) data[i] = (uint8_t)(i * 7);
+
+    Resource* res = Resource::create(link, data, true, link->linkId);
+    check(res->totalParts > 1, "1000-byte payload splits into multiple SDU parts");
+    check(res->hashmap.size() == res->totalParts * Resource::MAPHASH_LEN, "hashmap sized to totalParts * MAPHASH_LEN");
+
+    Packet adv = res->buildAdvertisement();
+    check(adv.context == CTX_RESOURCE_ADV, "advertisement packet context is RESOURCE_ADV");
+
+    cmp_ctx_t ctx;
+    MsgpackBuffer buf;
+    // The packet's data is already Link-encrypted; decrypt it back like a
+    // receiver would before reading the msgpack map.
+    std::vector<uint8_t> advPlain = link->decrypt(adv.data);
+    msgpackInitReader(&ctx, &buf, advPlain);
+
+    uint32_t mapSize = 0;
+    check(cmp_read_map(&ctx, &mapSize) && mapSize == 11, "advertisement is an 11-entry msgpack map");
+
+    // Round-trip the "t"/"n"/"h" fields by walking key/value pairs.
+    bool sawTransferSize = false, sawParts = false, sawHash = false;
+    for (uint32_t i = 0; i < mapSize; i++) {
+        uint32_t keyLen = 0;
+        char key[4] = {0};
+        cmp_read_str_size(&ctx, &keyLen);
+        ctx.read(&ctx, key, keyLen);
+
+        if (key[0] == 't' && keyLen == 1) {
+            uint64_t t = 0;
+            cmp_read_uinteger(&ctx, &t);
+            check(t == res->encryptedStream.size(), "advertisement 't' matches encrypted stream size");
+            sawTransferSize = true;
+        } else if (key[0] == 'n' && keyLen == 1) {
+            uint64_t n = 0;
+            cmp_read_uinteger(&ctx, &n);
+            check(n == res->totalParts, "advertisement 'n' matches totalParts");
+            sawParts = true;
+        } else if (key[0] == 'h' && keyLen == 1) {
+            std::vector<uint8_t> h;
+            cmpReadBin(&ctx, h, 64);
+            check(h == res->hash, "advertisement 'h' matches resource hash");
+            sawHash = true;
+        } else {
+            // Skip whatever value type this is. cmp_read_object() only reads
+            // the type/size marker for bin/str values, not the payload
+            // bytes, so those need an explicit skip or later reads desync.
+            cmp_object_t obj;
+            cmp_read_object(&ctx, &obj);
+            if (obj.type == CMP_TYPE_BIN8 || obj.type == CMP_TYPE_BIN16 || obj.type == CMP_TYPE_BIN32) {
+                ctx.skip(&ctx, obj.as.bin_size);
+            } else if (obj.type == CMP_TYPE_STR8 || obj.type == CMP_TYPE_STR16 || obj.type == CMP_TYPE_STR32 ||
+                       obj.type == CMP_TYPE_FIXSTR) {
+                ctx.skip(&ctx, obj.as.str_size);
+            }
+        }
+    }
+    check(sawTransferSize && sawParts && sawHash, "advertisement contained t/n/h fields");
+}
+
 int main() {
     test_hex_roundtrip();
     test_x25519_shared_secret();
@@ -237,6 +348,9 @@ int main() {
     test_link_id_from_request();
     test_link_signalling_bytes();
     test_link_accept_and_proof();
+    test_request_envelope_parse();
+    test_resource_hash_orderings();
+    test_resource_advertisement_self_consistency();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

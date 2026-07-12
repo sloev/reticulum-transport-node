@@ -250,6 +250,53 @@ def vec_link_signalling():
     }
 
 
+def vec_request_envelope():
+    # Decoupled from the Link/Token machinery (already verified elsewhere):
+    # this is exactly the plaintext RNS.Link.request() would hand to
+    # Token.encrypt(), captured before encryption, so it tests msgpack
+    # parsing on its own.
+    from RNS.vendor import umsgpack
+
+    path = "/pn/get/stats"
+    path_hash = RNS.Identity.truncated_hash(path.encode("utf-8"))
+    timestamp = 1783840999.708162
+    data = [None, None]
+    plaintext = umsgpack.packb([timestamp, path_hash, data])
+
+    return {
+        "path": path,
+        "path_hash": hx(path_hash),
+        "timestamp": timestamp,
+        "plaintext": hx(plaintext),
+        "note": "RNS.Link.request() plaintext (pre-Token-encryption): "
+                "msgpack [timestamp(float64), path_hash(16 bytes), data]. "
+                "path_hash = RNS.Identity.truncated_hash(path.encode())[:16].",
+    }
+
+
+def vec_resource_hash_orderings():
+    # Cross-checked against attermann/microReticulum's Resource.cpp: the
+    # overall resource hash and the encrypted payload use *different*
+    # concatenation orders of data and random_hash. Easy to get backwards.
+    data = b"resource-payload-bytes-for-testing"
+    random_hash = bytes(range(4))
+
+    resource_hash = RNS.Identity.full_hash(data + random_hash)  # data THEN random_hash
+    payload_to_encrypt = random_hash + data  # random_hash THEN data
+
+    chunk = data[:16]
+    map_hash = RNS.Identity.full_hash(chunk + random_hash)[:4]  # chunk THEN random_hash
+
+    return {
+        "data": hx(data),
+        "random_hash": hx(random_hash),
+        "resource_hash": hx(resource_hash),
+        "payload_to_encrypt": hx(payload_to_encrypt),
+        "chunk": hx(chunk),
+        "map_hash": hx(map_hash),
+    }
+
+
 def vec_link_request(reticulum):
     captured = []
     RNS.Transport.outbound = staticmethod(lambda packet: captured.append(packet.raw) or True)
@@ -361,6 +408,22 @@ def emit_cpp_header(vectors, path):
     lines.append(f'constexpr const char* LINK_SIGNALLING_BYTES_HEX = {_cstr(lsig["signalling_bytes"])};')
     lines.append("")
 
+    rq = vectors["request_envelope"]
+    lines.append(f'constexpr const char* REQUEST_PATH = {_cstr(rq["path"])};')
+    lines.append(f'constexpr const char* REQUEST_PATH_HASH_HEX = {_cstr(rq["path_hash"])};')
+    lines.append(f'constexpr double REQUEST_TIMESTAMP = {rq["timestamp"]};')
+    lines.append(f'constexpr const char* REQUEST_PLAINTEXT_HEX = {_cstr(rq["plaintext"])};')
+    lines.append("")
+
+    rh = vectors["resource_hash_orderings"]
+    lines.append(f'constexpr const char* RESOURCE_DATA_HEX = {_cstr(rh["data"])};')
+    lines.append(f'constexpr const char* RESOURCE_RANDOM_HASH_HEX = {_cstr(rh["random_hash"])};')
+    lines.append(f'constexpr const char* RESOURCE_HASH_HEX = {_cstr(rh["resource_hash"])};')
+    lines.append(f'constexpr const char* RESOURCE_PAYLOAD_TO_ENCRYPT_HEX = {_cstr(rh["payload_to_encrypt"])};')
+    lines.append(f'constexpr const char* RESOURCE_CHUNK_HEX = {_cstr(rh["chunk"])};')
+    lines.append(f'constexpr const char* RESOURCE_MAP_HASH_HEX = {_cstr(rh["map_hash"])};')
+    lines.append("")
+
     lines.append("struct PacketCase {")
     lines.append("    const char* name;")
     lines.append("    const char* raw_hex;")
@@ -412,6 +475,8 @@ def main():
         token_vec = vec_token_aes256()
         link_vec = vec_link_request(reticulum)
         link_signalling = vec_link_signalling()
+        request_envelope = vec_request_envelope()
+        resource_hash_orderings = vec_resource_hash_orderings()
 
     vectors = {
         "rns_version": RNS_VERSION,
@@ -424,6 +489,8 @@ def main():
         "token_aes256": token_vec,
         "link_request": link_vec,
         "link_signalling": link_signalling,
+        "request_envelope": request_envelope,
+        "resource_hash_orderings": resource_hash_orderings,
     }
 
     json.dump(vectors, sys.stdout, indent=2)

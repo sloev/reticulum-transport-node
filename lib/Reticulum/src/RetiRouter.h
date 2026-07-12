@@ -15,7 +15,7 @@ public:
     // Matches RNS's conventional path-hop bound (RNS.Transport.PATHFINDER_M);
     // hops is a full wire byte (0-255), so this is a sanity ceiling against
     // routing loops/garbage, not a tuned mesh-diameter estimate.
-    static const uint8_t MAX_HOPS = 128;
+    static constexpr uint8_t MAX_HOPS = 128;
 
     Identity* id;
     Storage storage;
