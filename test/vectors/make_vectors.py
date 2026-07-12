@@ -172,6 +172,29 @@ def vec_packet_parse_cases():
     return cases
 
 
+def vec_identity_encrypt():
+    # Fixed target identity + a captured real ciphertext token (ephemeral
+    # key is random per RNS.Identity.encrypt() call, so this checks
+    # decrypt() -- the deterministic direction -- against a real token
+    # rather than trying to reproduce encrypt()'s output byte-for-byte.
+    prv_bytes = bytes(range(64))
+    identity = RNS.Identity(create_keys=False)
+    identity.load_private_key(prv_bytes)
+
+    plaintext = b"lxmf-propagation-payload-secret"
+    token = identity.encrypt(plaintext)
+    decrypted = identity.decrypt(token)
+    assert decrypted == plaintext
+
+    return {
+        "private_key": hx(prv_bytes),
+        "plaintext": hx(plaintext),
+        "ciphertext_token": hx(token),
+        "note": "ciphertext_token = ephemeral_x25519_pub(32) || Token(HKDF(ECDH(ephemeral_priv, identity_pub), "
+                "salt=identity_hash, length=64)).encrypt(plaintext)",
+    }
+
+
 def vec_x25519_ed25519():
     from RNS.Cryptography import X25519PrivateKey, Ed25519PrivateKey
 
@@ -396,6 +419,12 @@ def emit_cpp_header(vectors, path):
     lines.append(f'constexpr const char* TOKEN_HEX = {_cstr(tok["token"])};')
     lines.append("")
 
+    ienc = vectors["identity_encrypt"]
+    lines.append(f'constexpr const char* IDENTITY_ENCRYPT_PRIVATE_KEY_HEX = {_cstr(ienc["private_key"])};')
+    lines.append(f'constexpr const char* IDENTITY_ENCRYPT_PLAINTEXT_HEX = {_cstr(ienc["plaintext"])};')
+    lines.append(f'constexpr const char* IDENTITY_ENCRYPT_CIPHERTEXT_TOKEN_HEX = {_cstr(ienc["ciphertext_token"])};')
+    lines.append("")
+
     lr = vectors["link_request"]
     lines.append(f'constexpr const char* LINK_SERVER_IDENTITY_PRIVATE_HEX = {_cstr(lr["server_identity_private"])};')
     lines.append(f'constexpr const char* LINK_RAW_LR_PACKET_HEX = {_cstr(lr["raw_lr_packet"])};')
@@ -477,6 +506,7 @@ def main():
         link_signalling = vec_link_signalling()
         request_envelope = vec_request_envelope()
         resource_hash_orderings = vec_resource_hash_orderings()
+        identity_encrypt = vec_identity_encrypt()
 
     vectors = {
         "rns_version": RNS_VERSION,
@@ -491,6 +521,7 @@ def main():
         "link_signalling": link_signalling,
         "request_envelope": request_envelope,
         "resource_hash_orderings": resource_hash_orderings,
+        "identity_encrypt": identity_encrypt,
     }
 
     json.dump(vectors, sys.stdout, indent=2)

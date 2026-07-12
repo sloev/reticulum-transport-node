@@ -109,5 +109,45 @@ public:
     std::vector<uint8_t> getEd25519PublicKey() const {
         return std::vector<uint8_t>(publicKey.begin() + 32, publicKey.end());
     }
+
+    // RNS.Identity.encrypt(): single-shot asymmetric encryption to this
+    // identity's X25519 public key -- an ephemeral X25519 keypair is
+    // generated per call, ECDH'd against the target, and the shared secret
+    // HKDF'd (salt = target identity hash) into a 64-byte Token key. Output
+    // is ephemeral_pub(32) || token. Used for e.g. RNS.Destination-level
+    // encryption to a SINGLE destination's identity (as opposed to Link
+    // encryption, which uses per-link ephemeral keys on both sides).
+    static std::vector<uint8_t> encryptTo(const std::vector<uint8_t>& targetX25519Pub,
+                                           const std::vector<uint8_t>& targetIdentityHash16,
+                                           const std::vector<uint8_t>& plaintext) {
+        std::vector<uint8_t> ephemeralPub, ephemeralPriv;
+        Crypto::genKeys(ephemeralPub, ephemeralPriv);
+
+        std::vector<uint8_t> shared = Crypto::x25519_shared(ephemeralPriv, targetX25519Pub);
+        std::vector<uint8_t> derived = Crypto::hkdf(shared, targetIdentityHash16, 64);
+        std::vector<uint8_t> signingKey(derived.begin(), derived.begin() + 32);
+        std::vector<uint8_t> encryptionKey(derived.begin() + 32, derived.end());
+
+        std::vector<uint8_t> token = Crypto::tokenEncrypt(signingKey, encryptionKey, plaintext);
+        std::vector<uint8_t> out = ephemeralPub;
+        out.insert(out.end(), token.begin(), token.end());
+        return out;
+    }
+
+    // RNS.Identity.decrypt(): the inverse, using this identity's own X25519
+    // private key. Returns empty on failure (malformed input or HMAC
+    // mismatch).
+    std::vector<uint8_t> decrypt(const std::vector<uint8_t>& ciphertextToken) const {
+        if (ciphertextToken.size() <= 32) return std::vector<uint8_t>();
+        std::vector<uint8_t> ephemeralPub(ciphertextToken.begin(), ciphertextToken.begin() + 32);
+        std::vector<uint8_t> token(ciphertextToken.begin() + 32, ciphertextToken.end());
+
+        std::vector<uint8_t> shared = Crypto::x25519_shared(x25519Priv, ephemeralPub);
+        std::vector<uint8_t> derived = Crypto::hkdf(shared, address, 64);
+        std::vector<uint8_t> signingKey(derived.begin(), derived.begin() + 32);
+        std::vector<uint8_t> encryptionKey(derived.begin() + 32, derived.end());
+
+        return Crypto::tokenDecrypt(signingKey, encryptionKey, token);
+    }
 };
 }

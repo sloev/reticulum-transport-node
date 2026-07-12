@@ -131,6 +131,26 @@ static void test_packet_parse_cases() {
     }
 }
 
+static void test_identity_decrypt() {
+    std::printf("test_identity_decrypt\n");
+    Identity id(hexToBytes(TestVectors::IDENTITY_ENCRYPT_PRIVATE_KEY_HEX));
+    auto token = hexToBytes(TestVectors::IDENTITY_ENCRYPT_CIPHERTEXT_TOKEN_HEX);
+
+    auto plain = id.decrypt(token);
+    checkHexEq(plain, TestVectors::IDENTITY_ENCRYPT_PLAINTEXT_HEX, "Identity::decrypt matches RNS Identity.encrypt() output");
+}
+
+static void test_identity_encrypt_decrypt_round_trip() {
+    std::printf("test_identity_encrypt_decrypt_round_trip\n");
+    auto priv = hexToBytes(TestVectors::IDENTITY_PRIVATE_KEY_HEX);
+    Identity id(priv);
+
+    std::vector<uint8_t> plaintext = {'r', 'o', 'u', 'n', 'd', '-', 't', 'r', 'i', 'p'};
+    auto token = Identity::encryptTo(id.getX25519PublicKey(), id.getAddress(), plaintext);
+    auto decrypted = id.decrypt(token);
+    check(decrypted == plaintext, "Identity::encryptTo -> Identity::decrypt round trip");
+}
+
 static void test_announce_validated_by_construction() {
     // Cross-validates against a real, RNS-signed announce packet: parse it
     // and check our Ed25519 verification accepts it. This is the strongest
@@ -340,6 +360,8 @@ int main() {
     test_ed25519_deterministic_signature();
     test_hkdf();
     test_identity_derive();
+    test_identity_decrypt();
+    test_identity_encrypt_decrypt_round_trip();
     test_destination_hash();
     test_packet_parse_cases();
     test_announce_validated_by_construction();
