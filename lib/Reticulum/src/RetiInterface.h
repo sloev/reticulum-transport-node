@@ -18,11 +18,24 @@ public:
     size_t mtu;
     std::function<void(const std::vector<uint8_t>&, Interface*)> onPacket;
 
+    // Only LoRa needs this: the LoRa PHY has a hard 255-byte payload
+    // ceiling (a one-byte length field), well under RNS's ~500-byte
+    // packet size, so oversized packets are split across two radio
+    // frames and reassembled here. Every other interface (Serial, BLE,
+    // etc) is sized to carry a full packet in one frame (mtu == RNS's
+    // packet ceiling), so this must stay off for them: the split/frame
+    // marker below is stolen from the packet's own first byte, and an
+    // ANNOUNCE or PROOF packet's real header byte always has that bit
+    // set (PacketType ANNOUNCE=1, PROOF=3 -- odd values), so treating
+    // every inbound frame as fragmentation-tagged would silently drop
+    // every announce and proof arriving on a non-LoRa interface.
+    bool useFragmentation = false;
+
     Interface(String n, size_t m) : name(n), mtu(m) {}
     virtual void sendRaw(const std::vector<uint8_t>& data) = 0;
 
     void send(const std::vector<uint8_t>& packet) {
-        if (packet.size() <= mtu) {
+        if (!useFragmentation || packet.size() <= mtu) {
             sendRaw(packet);
             return;
         }
@@ -51,7 +64,12 @@ public:
 
     void receive(const std::vector<uint8_t>& data) {
         if (data.empty()) return;
-        
+
+        if (!useFragmentation) {
+            if (onPacket) onPacket(data, this);
+            return;
+        }
+
         // GC Stale Buffers
         static unsigned long last_clean = 0;
         if (millis() - last_clean > 5000) {

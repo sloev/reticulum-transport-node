@@ -22,6 +22,7 @@
 #include "RetiMsgpack.h"
 #include "RetiRequest.h"
 #include "RetiResource.h"
+#include "RetiInterface.h"
 
 #include <cstdio>
 
@@ -354,6 +355,39 @@ static void test_resource_advertisement_self_consistency() {
     check(sawTransferSize && sawParts && sawHash, "advertisement contained t/n/h fields");
 }
 
+// Regression check for a real bug found while designing the interop test:
+// a non-fragmenting interface (Serial/BLE, mtu == RNS packet size) must
+// pass every inbound frame straight to onPacket. ANNOUNCE (type=1) and
+// PROOF (type=3) packets always have their header byte's low bit set, so
+// if useFragmentation were mistakenly left on for such an interface, every
+// announce and proof arriving on it would be silently swallowed as a
+// bogus split-fragment instead of delivered.
+class RecordingInterface : public Interface {
+public:
+    std::vector<std::vector<uint8_t>> received;
+    RecordingInterface() : Interface("Test", 500) {}
+    void sendRaw(const std::vector<uint8_t>&) override {}
+};
+
+void test_interface_passthrough_for_odd_typed_packets() {
+    RecordingInterface iface;
+    iface.onPacket = [&](const std::vector<uint8_t>& d, Interface*) { iface.received.push_back(d); };
+
+    // ANNOUNCE, HEADER_1, SINGLE dest: header byte = 0b00000001 -> low bit set.
+    std::vector<uint8_t> announceLike = {0x01, 0x00};
+    announceLike.insert(announceLike.end(), 40, 0xAB);
+    iface.receive(announceLike);
+    check(iface.received.size() == 1 && iface.received[0] == announceLike,
+          "non-fragmenting interface passes an ANNOUNCE-shaped frame straight through");
+
+    // PROOF, HEADER_1, LINK dest: header byte = 0b00001111 -> also low bit set.
+    std::vector<uint8_t> proofLike = {0x0F, 0x00};
+    proofLike.insert(proofLike.end(), 20, 0xCD);
+    iface.receive(proofLike);
+    check(iface.received.size() == 2 && iface.received[1] == proofLike,
+          "non-fragmenting interface passes a PROOF-shaped frame straight through");
+}
+
 int main() {
     test_hex_roundtrip();
     test_x25519_shared_secret();
@@ -373,6 +407,7 @@ int main() {
     test_request_envelope_parse();
     test_resource_hash_orderings();
     test_resource_advertisement_self_consistency();
+    test_interface_passthrough_for_odd_typed_packets();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
