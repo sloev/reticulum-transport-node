@@ -27,3 +27,22 @@ CXX="${CXX:-g++}"
     -o rnsc_host_tests
 
 ./rnsc_host_tests
+
+# Separate compile/smoke check for RetiLXMF.h -- needs the filesystem mock
+# (FsShim.h), which is deliberately kept out of the main vector-driven binary
+# above (see test/README.md).
+"$CXX" -std=c++17 -Wall -Wextra -DRNSC_HOST_TEST=1 \
+    -I . \
+    -I "$ROOT/lib/Reticulum/src" \
+    -I "$ROOT/lib/Monocypher" \
+    -I "$ROOT/lib/TinyAES" \
+    -I "$ROOT/lib/cmp" \
+    test_lxmf_compile.cpp \
+    "$ROOT/lib/Monocypher/monocypher.c" \
+    "$ROOT/lib/Monocypher/monocypher-ed25519.c" \
+    "$ROOT/lib/Reticulum/src/sha256.cpp" \
+    "$ROOT/lib/TinyAES/aes.c" \
+    "$ROOT/lib/cmp/cmp.c" \
+    -o rnsc_lxmf_compile_test
+
+./rnsc_lxmf_compile_test

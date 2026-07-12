@@ -1,6 +1,7 @@
 #pragma once
 #include "RetiMsgpack.h"
 #include "RetiLink.h"
+#include "RetiResource.h"
 #include <map>
 #include <functional>
 
@@ -16,11 +17,24 @@ struct RequestEnvelope {
     std::vector<uint8_t> dataPayload; // raw msgpack bytes of the "data" value, schema depends on path
 };
 
+// A handled request's outcome: either a ready-to-send small RESPONSE
+// packet, or -- when the [request_id, response] envelope is too big for
+// one packet -- the raw envelope bytes for the caller to hand to
+// Resource::create(link, envelope, true, requestId) instead (matches
+// RNS.Link.handle_request()'s size check).
+struct RequestResult {
+    bool handled = false;
+    bool needsResource = false;
+    Packet responsePacket;
+    std::vector<uint8_t> resourceEnvelope;
+    std::vector<uint8_t> requestId;
+};
+
 class Request {
 public:
     // Returns raw msgpack-encoded bytes for the response *value* (schema
-    // depends on path, same as dataPayload) -- Request wraps it in the
-    // [request_id, response] envelope.
+    // depends on path, same as dataPayload) -- handleRequest() wraps it in
+    // the [request_id, response] envelope.
     using Handler = std::function<std::vector<uint8_t>(const std::vector<uint8_t>& dataPayload, Link* link)>;
 
     std::map<std::vector<uint8_t>, Handler> handlers;
@@ -54,30 +68,41 @@ public:
     }
 
     // Handles an inbound REQUEST packet on an active link: decrypts,
-    // dispatches to the registered handler by path hash, and returns the
-    // encrypted RESPONSE packet ready to send. Returns a default-constructed
-    // Packet (data empty) if there's no matching handler or the link isn't
-    // active, matching RNS's "unknown/unauthorized request gets no
-    // response" behavior.
-    Packet handleRequest(Link* link, const Packet& reqPacket) {
+    // dispatches to the registered handler by path hash, and builds the
+    // [request_id, response] envelope. If it fits in one packet, returns it
+    // pre-wrapped as a RESPONSE packet; otherwise returns the raw envelope
+    // for the caller to send via Resource (both cases carry the *same*
+    // envelope -- RNS.Link.handle_request() does this too: the Resource's
+    // request_id parameter is only for advertisement-level matching, the
+    // resource's actual data is still the full envelope).
+    RequestResult handleRequest(Link* link, const Packet& reqPacket) {
+        RequestResult result;
+
         std::vector<uint8_t> plaintext = link->decrypt(reqPacket.data);
         RequestEnvelope env;
-        if (plaintext.empty() || !parseEnvelope(plaintext, env)) return Packet();
+        if (plaintext.empty() || !parseEnvelope(plaintext, env)) return result;
 
         auto it = handlers.find(env.pathHash);
-        if (it == handlers.end()) return Packet();
+        if (it == handlers.end()) return result;
 
         std::vector<uint8_t> responsePayload = it->second(env.dataPayload, link);
-        std::vector<uint8_t> requestId = reqPacket.getTruncatedHash();
+        result.requestId = reqPacket.getTruncatedHash();
+        result.handled = true;
 
         cmp_ctx_t ctx;
         MsgpackBuffer buf;
         msgpackInitWriter(&ctx, &buf);
         cmp_write_array(&ctx, 2);
-        cmp_write_bin(&ctx, requestId.data(), (uint32_t)requestId.size());
+        cmp_write_bin(&ctx, result.requestId.data(), (uint32_t)result.requestId.size());
         buf.out.insert(buf.out.end(), responsePayload.begin(), responsePayload.end());
 
-        return link->wrapData(buf.out, CTX_RESPONSE);
+        if (buf.out.size() > Resource::SDU) {
+            result.needsResource = true;
+            result.resourceEnvelope = buf.out;
+        } else {
+            result.responsePacket = link->wrapData(buf.out, CTX_RESPONSE);
+        }
+        return result;
     }
 };
 }

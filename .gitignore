@@ -11,5 +11,7 @@ __pycache__
 # run -- never checked in, so vectors can't silently drift from the spec
 # version this firmware claims to support.
 test/host/vectors_generated.h
-test/vectors/vectors.json
+test/host/vectors.json
 test/host/rnsc_host_tests
+test/host/rnsc_lxmf_compile_test
+test/vectors/.vecvenv

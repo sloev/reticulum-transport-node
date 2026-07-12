@@ -61,4 +61,30 @@ inline bool cmpReadBin(cmp_ctx_t* ctx, std::vector<uint8_t>& out, uint32_t maxLe
     return ctx->read(ctx, out.data(), size);
 }
 
+// Reads a value that is either nil or an array of bin entries (used for
+// LXMF's MESSAGE_GET "wants"/"haves" fields, each an array of transient IDs
+// or None). Sets wasNil accordingly; on a real array, out is filled with
+// each entry's bytes.
+inline bool cmpReadOptionalBinArray(cmp_ctx_t* ctx, std::vector<std::vector<uint8_t>>& out, bool& wasNil, uint32_t maxEntryLen = 64) {
+    cmp_object_t obj;
+    if (!cmp_read_object(ctx, &obj)) return false;
+
+    if (obj.type == CMP_TYPE_NIL) {
+        wasNil = true;
+        return true;
+    }
+    wasNil = false;
+
+    if (obj.type != CMP_TYPE_FIXARRAY && obj.type != CMP_TYPE_ARRAY16 && obj.type != CMP_TYPE_ARRAY32) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < obj.as.array_size; i++) {
+        std::vector<uint8_t> entry;
+        if (!cmpReadBin(ctx, entry, maxEntryLen)) return false;
+        out.push_back(entry);
+    }
+    return true;
+}
+
 }
