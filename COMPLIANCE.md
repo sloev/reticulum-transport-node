@@ -1,102 +1,146 @@
-# 🛡️ RNS-C Compliance & Audit Matrix
+# Compliance Ledger
 
-**Firmware Version:** 0.3.0-RC1 (33C3 Edition)
-**Target Hardware:** Heltec WiFi LoRa 32 V3 (ESP32-S3)
-**Spec Reference:** [Reticulum Network Stack Manual v1.1.3](https://reticulum.network/manual/)
+What this firmware actually implements, checked against the reference
+implementation, not what an earlier draft of this document claimed. Every
+row marked **verified** has a corresponding host-test check in
+`test/host/test_main.cpp` (or `test_lxmf_compile.cpp`) that runs against a
+byte-exact vector generated from the real `rns` 1.3.7 / `lxmf` 1.0.1 Python
+packages on every CI run — see `test/vectors/make_vectors.py`. Nothing here
+is asserted from reading the manual alone.
 
----
-
-## 1. Cryptography & Identity (The Iron Core)
-*Reference: Manual v1.1.3, Chapter 6 (Identities) & Chapter 6.7.5 (Cryptographic Primitives)*
-
-We employ a **vendored** implementation of `Monocypher 4.0.2` to ensure binary reproducibility and strictly enforce the primitives defined in the RNS spec. We do not rely on platform-specific crypto libraries where consistency is critical.
-
-| Component | RNS Spec v1.1.3 Requirement | RNS-C Implementation | Status |
-| :--- | :--- | :--- | :--- |
-| **Identity Generation** | Ed25519 Public Key derived from 32-byte seed. | `lib/Monocypher`: `crypto_ed25519_key_pair` acting on a persisted 32-byte random seed in flash. | ✅ **STRICT** |
-| **Addressing** | SHA-256 hash of Public Key (truncated to 16 bytes). | `RetiIdentity.h`: `sha256(pub_key)[0..16]`. Matches `rnsd` hashing exactly. | ✅ **MATCH** |
-| **Signatures** | Ed25519 (Schnorr). | `monocypher-ed25519`: `crypto_ed25519_sign`. | ✅ **MATCH** |
-| **Key Exchange** | X25519 (Curve25519 ECDH). | `monocypher`: `crypto_x25519`. Ephemeral keys generated per Link Request. | ✅ **MATCH** |
-| **Encryption** | AES-128-CBC (PKCS7 Padding). | `mbedtls` (Hardware Accelerated). Compatible with RNS default `Fernet` logic. | ✅ **MATCH** |
+Spec reference: [Reticulum Network Stack Manual](https://reticulum.network/manual/), LXMF 1.0.1 source.
 
 ---
 
-## 2. Interface Specifications
-*Reference: Manual v1.1.3, Chapter 8 (Interfaces) & Chapter 7.2 (RNode)*
+## 1. Identity & Cryptography
 
-### A. RNode LoRa Interface (PHY)
-The firmware implements the raw `RNode` framing protocol. This ensures the device is recognized as a valid interface by any standard Reticulum instance.
+| Component | RNS requirement | Implementation | Status |
+|---|---|---|---|
+| Identity | Paired X25519(32B) + Ed25519(32B) keys, not one key doing both jobs | `RetiIdentity.h`: 64-byte private key blob (`x25519_priv \|\| ed25519_seed`), 64-byte public key (`x25519_pub \|\| ed25519_pub`) | **verified** |
+| Address / identity hash | `SHA256(public_key)[:16]` | `Identity::derive()` | **verified** |
+| Signing | Ed25519 | Monocypher `crypto_ed25519_sign`/`crypto_ed25519_check` | **verified** |
+| Key exchange | X25519 ECDH | Monocypher `crypto_x25519` | **verified** |
+| Identity-level encryption | `RNS.Identity.encrypt/decrypt`: ephemeral X25519 → HKDF(shared, target_hash) → Token | `Identity::encryptTo`/`decrypt` | **verified** |
+| Link encryption (Token) | `IV(16) \|\| AES-256-CBC ciphertext \|\| HMAC-SHA256(32)`, signing key first half of derived material, encryption key second half | `Crypto::tokenEncrypt`/`tokenDecrypt` | **verified** |
+| HMAC verification | Every decrypt must reject on MAC mismatch | `tokenDecrypt` uses constant-time compare, returns empty on failure | **verified** |
+| Entropy source | CSPRNG, not a seeded/deterministic PRNG | ESP32: `esp_random()` (HW RNG). nRF52840: SoftDevice `sd_rand_application_vector_get` when BLE is up, else `NRF_RNG` peripheral directly | manual review (no host-testable RNG hardware) |
 
-* **Framing:** Raw RNode Protocol.
-* **Header:** `[ 1 byte ]` $\to$ `(SequenceNumber << 4) | (Flags & 0x0F)`
-* **MTU:** 500 Bytes (Strict enforcement).
-* **Modulation Parameters (Fast Mesh / Default):**
-    * **Frequency:** 867.2 MHz (EU868) / 915.0 MHz (US915)
-    * **Spreading Factor:** SF7
-    * **Bandwidth:** 125 kHz
-    * **Coding Rate:** 4/5
+## 2. Packet & Destination
 
-### B. Transport & Routing
-*Reference: Manual v1.1.3, Chapter 6.7.4 (Announce Propagation Rules)*
+| Component | RNS requirement | Implementation | Status |
+|---|---|---|---|
+| Header bits | flags byte incl. header type, context flag, propagation/destination type, transport type | `RetiPacket.h` | **verified** |
+| HEADER_2 addressing | two 16-byte fields (`transport_id \|\| dest_hash`), not one 32-byte field | `Packet::parse` | **verified** |
+| Context byte | always present after the address field(s), not conditional | `Packet::parse`/`serialize` | **verified** |
+| Truncated hash / dedup key | `SHA256(hashable_part)[:16]`, `hashable_part = flags&0x0F \|\| raw[2:]` (hops excluded) | `Packet::getTruncatedHash`/`getHashablePart` | **verified** |
+| Destination naming | `name_hash = SHA256("app.aspect")[:10]`, `dest_hash = SHA256(name_hash \|\| identity_hash)[:16]` | `RetiDestination.h` | **verified** |
 
-* **Announce Propagation:** Implements the jittered rebroadcast mechanism (200ms-1000ms delay) to prevent packet storms (CSMA/CA software emulation).
-* **Hop Limits:** Decrements TTL on all forwarded packets; drops packet if TTL=0.
+## 3. Announce
+
+| Component | RNS requirement | Implementation | Status |
+|---|---|---|---|
+| Payload shape | `pubkey(64) \|\| name_hash(10) \|\| random_hash(10) \|\| sig(64) \|\| app_data` | `RetiAnnounce.h` | **verified** |
+| Signature | over `dest_hash \|\| pubkey \|\| name_hash \|\| random_hash \|\| app_data` | `Announce::build`, cross-checked against `RNS.Identity.validate_announce` | **verified** |
+| Rebroadcast | jittered (200–1000ms) forward, not immediate, so neighbors that heard the same announce don't retransmit in lockstep | `Router::process`/`loop` | manual review (timing behavior, not vector-testable) |
+| Ratcheted announces | optional `ratchet(32)` field, ratchet key rotation | not implemented | **gap** |
+
+## 4. Routing
+
+| Component | RNS requirement | Implementation | Status |
+|---|---|---|---|
+| Dedup | on truncated hash of the hashable part (hops legitimately differ hop to hop, so raw-byte hashing would treat one logical packet arriving by two paths as two packets) | `Router::process` | **verified** |
+| Hop accounting | increment on forward, drop at a sane ceiling | `Router::MAX_HOPS = 128` | manual review |
+
+## 5. Link
+
+Responder role only — this firmware never initiates a link. `RNS.Link`'s
+initiator code path (sending a LINK_REQ, verifying LRPROOF) is not
+implemented, because nothing here needs to open a link to another node.
+
+| Component | RNS requirement | Implementation | Status |
+|---|---|---|---|
+| Link ID | `SHA256(hashable_part_of_LR_packet, with trailing MTU-signalling bytes past the 64B ephemeral-pubkey block stripped)[:16]` | `Link::linkIdFromRequest` | **verified** |
+| Handshake | ECDH(our ephemeral X25519, peer's X25519) → HKDF(shared, salt=link_id, 64B) → signing/encryption key split | `Link::accept` | **verified** |
+| LRPROOF | `sig(link_id \|\| x_pub \|\| owner_ed25519_pub \|\| signalling) \|\| x_pub \|\| signalling`, signed with the node's real (static) identity key, not an ephemeral one | `Link::buildProof` | **verified** |
+| Signalling bytes | 3 bytes: top 3 bits of byte 0 = mode, remaining 21 bits = MTU | `Link::signallingBytes` | **verified** |
+| Link mode | AES-256-CBC (`MODE_AES256_CBC`) — the RNS default | `LINK_MODE_AES256_CBC` | **verified** |
+| LINKIDENTIFY | `pubkey(64) \|\| sig(link_id \|\| pubkey)`, Ed25519-verified against the announced-or-claimed pubkey | `Link::handleIdentify` | **verified** |
+| LINKCLOSE | sets link to closed, torn down on next `Router`/`LXMFPropagationNode::loop()` pass | `Link::handleClose` | manual review |
+| Keepalive / staleness | inbound traffic refreshes `lastInbound`; link considered stale after 300s idle | `Link::touch`/`isStale` | manual review |
+| Packet-delivery proof | `full_hash(packet's hashable part, 32B) \|\| sig`, signed with the link owner's static identity key, unencrypted, PROOF type addressed to the link — what a sender's `PacketReceipt` waits on before marking a link-delivered packet (e.g. a propagation upload) as delivered instead of timing out | `Link::buildPacketProof` | **verified** (structure and self-consistency checked in `test_lxmf_compile.cpp`, not against a live RNS receipt) |
+
+## 6. Request / Response
+
+| Component | RNS requirement | Implementation | Status |
+|---|---|---|---|
+| Request envelope | encrypted msgpack `[timestamp, path_hash(16), data]` | `RetiRequest.h` | **verified** |
+| Response envelope | `[request_id, response]`, `request_id = truncated_hash(request_packet)` | `Request::handleRequest` | **verified** |
+| Oversized response | if the envelope exceeds one packet's SDU, hand off to a Resource instead of dropping it | `RequestResult::needsResource` path | manual review |
+
+## 7. Resource
+
+Send side only — this firmware never accepts an inbound Resource. That's
+a real, user-visible limit, not just an internal one: LXMF only sends a
+message as a single link packet if its content fits in 319 bytes
+(`LXMessage.LINK_PACKET_MAX_CONTENT` with default RNS/LXMF parameters) —
+anything longer, or carrying an attachment, gets sent as a Resource
+upload instead, which this node has no way to receive. In practice: short
+text messages sync fine; longer messages or anything with an attachment
+sent *to* this node's propagation cache will fail to upload (the sender's
+transfer will stall/time out). This firmware also never issues outbound
+requests large enough to draw a Resource-sized response back, which is
+why the send side alone has been sufficient so far.
+
+| Component | RNS requirement | Implementation | Status |
+|---|---|---|---|
+| Payload encryption | the *whole* payload (`random_hash \|\| data`) is Token-encrypted once; the resulting stream is sliced into raw SDU-sized chunks, not re-encrypted per chunk | `Resource::create` | manual review, cross-checked against a live RNS Resource capture and `attermann/microReticulum`'s `Resource.cpp` |
+| Hash orderings | `hash = full_hash(data \|\| random_hash)`; `map_hash = full_hash(chunk \|\| random_hash)[:4]` — data and random_hash swap order between the two | `Resource::create`/`mapHash` | **verified** |
+| Advertisement | msgpack map, keys `t,d,n,h,r,o,i,l,q,f,m`, single-segment only (`i=1, l=1`) | `Resource::buildAdvertisement` | **verified** |
+| Part retransmission | `RESOURCE_REQ` → matching wanted map-hashes → resend those parts | `Resource::handleRequest` | manual review |
+| Compression | not implemented — encrypted LXMF payloads don't compress, so RNS senders skip bz2 for them in practice; flag `c` always reports 0 | n/a | **intentional gap**, documented |
+| Segmented resources | multi-segment transfer for payloads too large for one advertisement's hashmap | not implemented (this firmware's responses never get that large) | **gap** |
+
+## 8. LXMF Propagation Node
+
+| Component | RNS requirement | Implementation | Status |
+|---|---|---|---|
+| Destination | `lxmf.propagation` name hash, `dest_hash = SHA256(name_hash \|\| identity_hash)[:16]` | `LXMFPropagationNode` constructor | **verified** |
+| Announce app_data | `[legacy_pn, timebase, hosting, per_transfer_kb, per_sync_kb, [stamp_cost×3], metadata]`, the shape Sideband/NomadNet check before treating an announce as a real PN | `buildAnnounceAppData` | manual review (shape matches `LXMRouter.get_propagation_node_app_data`; no RTC on-device so `timebase` is uptime, not wall clock) |
+| Upload transport | a client sends `msgpack([timestamp, [lxmf_data, ...]])` as a plain (context NONE) Link-encrypted DATA packet over an established Link to the propagation destination — *not* a bare packet addressed to the destination hash — matching `LXMessage.__as_packet()`/`LXMRouter.propagation_packet` for method=PROPAGATED, representation=PACKET | `handlePropagationUpload` (dispatched from `handleLinkPacket` on context NONE) | **verified** (structure checked against LXMF source and driven end-to-end in `test_lxmf_compile.cpp` using a real link) |
+| Upload acknowledgement | reply with a packet-delivery proof so the sender's `PacketReceipt` resolves instead of timing out and retrying | `Link::buildPacketProof`, sent from `handlePropagationUpload` | **verified** |
+| Inbound caching | each `lxmf_data` entry (`dest_hash(16) \|\| Identity.encrypt()'d-to-the-recipient bytes` — already end-to-end encrypted to whoever the message is for, never decrypted by this node) stored keyed by `SHA256(lxmf_data)` (full 32-byte hash, no truncation), destination hash read from the first 16 bytes | `cacheIncomingMessage` | **verified** |
+| `MESSAGE_GET` — list | `data=[nil, nil]` → transient IDs + sizes for the identified client's delivery hash | `handleMessageGet` | manual review |
+| `MESSAGE_GET` — want/have | purge `haves`, stream `wants` within a per-call byte budget | `handleMessageGet` | manual review |
+| Link identification required | an unidentified link can't be attributed to a delivery hash, so it gets nothing | `handleMessageGet` early return | **verified** |
+| Storage quota | fixed cap (40 messages), oldest evicted first | `MAX_STORED_MESSAGES` | manual review |
+| Anti-spam stamps (`LXStamper`) | proof-of-work cost on inbound messages | not implemented — this node enforces no stamp cost and expects none | **intentional gap**, documented |
+| Peer-to-peer PN sync (`/offer`) | propagation nodes gossip caches with each other | not implemented — this node only serves clients directly | **gap** |
+| Whitelist / access control | restrict caching to known identities | not implemented — accepts anything addressed to its propagation destination | **gap** |
 
 ---
 
-## 3. Supply Chain Security: Why Monocypher?
+## Why vendored crypto, not a system library
 
-We have explicitly **vendored** (embedded) the Monocypher v4.0.2 source code into `lib/Monocypher` rather than relying on an external library manager or the ESP-IDF default crypto for core primitives.
+`lib/Monocypher` (X25519, Ed25519) and `lib/TinyAES` (AES-256-CBC,
+compile-time configured for 256-bit keys specifically — most Arduino AES
+libraries default to 128) are committed source, not registry dependencies.
+Two reasons: the RNS wire format is unforgiving about exact primitive
+behavior (key splits, IV placement, hash truncation points), so pinning
+the actual bytes under test beats trusting a platform crypto library to
+keep matching; and a vendored, single-purpose implementation is something
+a reviewer can read start to finish, not a black box pulled from a
+package index at build time.
 
-1.  **Auditability:** The security-critical code is committed directly to the repo. It is immutable and open for inspection by any reviewer (including Linus) without needing to chase down dependencies.
-2.  **API Stability:** It protects us from upstream API breaks or "improvements" in system libraries that might break backward compatibility with the Reticulum spec.
-3.  **Size & Efficiency:** Monocypher compiles to <45KB, leaving maximum IRAM available for the Reticulum packet buffer and WiFi stack.
+## Field verification
 
----
+Host-side, every push: `test/host/build.sh` regenerates ground-truth
+vectors from `rns==1.3.7`/`lxmf==1.0.1`, builds two native binaries
+(protocol/crypto suite, LXMF compile-and-smoke-test), and runs both.
 
-## 4. Field Verification Procedure
-
-**Objective:** Prove interoperability with a Linux host running the official `rnsd`.
-
-### Prerequisites
-* Linux Host with Python 3.
-* Reticulum installed: `pip install rns`
-* Hardware: 1x Heltec V3 (Flashed with RNS-C)
-
-### Step 1: Configuration
-Connect the Heltec V3 via USB. Identify the port (e.g., `/dev/ttyACM0`).
-Edit `~/.reticulum/config` on the host to add the interface:
-
-```ini
-[[RNS_C_Test_Interface]]
-  type = RNodeInterface
-  interface_enabled = yes
-  outgoing = true
-  port = /dev/ttyACM0
-  frequency = 867200000
-  bandwidth = 125000
-  spreading_factor = 7
-  coding_rate = 5
-```
-
-### Step 2: Execution
-Run the Reticulum daemon in verbose mode to see the handshake:
-
-```bash
-rnsd -vv
-```
-
-### Step 3: Success Criteria
-Observe the log output for the following sequence:
-
-* [SerialInterface] Opened port /dev/ttyACM0...
-* [RNodeInterface] Configured RNode interface...
-* CRITICAL: [Transport] Interface RNS_C_Test_Interface is now active
-
-Finally, run rnstatus in a separate terminal. The device should appear in the interface list, and if the firmware is functioning correctly, you should see announces propagating from the mesh:
-
-
-| Status  | Name                 | Mode   | Rate    | Peers |
-| --------|----------------------|--------|---------|-------|
-| Up      | RNS_C_Test_Interface | Access | 21 kbps |     1 |
-
+Device-side, manually: flash either target, add it as a serial or BLE
+interface to a host running `rnsd -vv` or the Sideband/NomadNet app, and
+confirm an announce is received and a Link can be established. This isn't
+yet automated — no physical hardware is available in this project's build
+environment — so treat the host-test suite as proof of wire-format
+correctness, and a manual pairing session as proof the radio/BLE/serial
+transport underneath it actually carries those bytes.

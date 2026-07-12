@@ -14,6 +14,7 @@ Reticulum::RadioType radio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RS
 Reticulum::Identity* id;
 Reticulum::Config config;
 Reticulum::Router* router;
+Reticulum::LXMFPropagationNode* lxmfNode;
 
 // Interfaces
 Reticulum::LoRaInterface* lora;
@@ -67,13 +68,13 @@ void setup() {
     router->storage.begin();
     
     // 5. Application Layer (LXMF)
-    Reticulum::LXMFPropagationNode* lxmfNode = new Reticulum::LXMFPropagationNode(id);
-    router->onLocalDelivery = [lxmfNode](const std::vector<uint8_t>& raw, const Reticulum::Packet& p, Reticulum::Interface* src) {
-        lxmfNode->handleIncoming(raw, p);
+    lxmfNode = new Reticulum::LXMFPropagationNode(id);
+    router->onLocalDelivery = [](const std::vector<uint8_t>& raw, const Reticulum::Packet& p, Reticulum::Interface* src) {
+        lxmfNode->handleIncoming(raw, p, src);
     };
 
-    router->sendAnnounce();
-    
+    router->sendAnnounce(lxmfNode->propHash, lxmfNode->nameHash, lxmfNode->buildAnnounceAppData());
+
     RNS_LOG("RNS Node Online. Addr: %s", Reticulum::toHex(id->getAddress()).c_str());
 }
 
@@ -86,4 +87,5 @@ void loop() {
     wifi->loop();
 #endif
     router->loop();
+    lxmfNode->loop();
 }

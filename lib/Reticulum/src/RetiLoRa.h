@@ -15,8 +15,10 @@ class LoRaInterface : public Interface {
     volatile bool rxFlag = false;
 
 public:
-    // MTU 255 triggers split logic for 500-byte packets
-    LoRaInterface(RadioType* r) : Interface("LoRa", 255), radio(r) {}
+    // MTU 255 triggers split logic for 500-byte packets: the LoRa PHY's
+    // payload length field is one byte wide, a hard 255-byte ceiling well
+    // under RNS's ~500-byte packet size.
+    LoRaInterface(RadioType* r) : Interface("LoRa", 255), radio(r) { useFragmentation = true; }
 
     bool begin(float freq) {
         int state = radio->begin(freq, 125.0, 9, 5, 0x12, 22, 8);
