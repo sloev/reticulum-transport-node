@@ -4,6 +4,14 @@
 #include <stdint.h>
 #include <stddef.h>
 
+// Self-guarded C linkage (matches lib/Monocypher's headers): needed so this
+// vendored .c file, when compiled by a C++ toolchain that treats .c sources
+// as C++ (as PlatformIO's build and `g++ aes.c` both do), still defines
+// these symbols with the same linkage its callers declare them with.
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // #define the macros below to 1/0 to enable/disable the mode of operation.
 //
 // CBC enables AES encryption in CBC-mode of operation.
@@ -89,5 +97,8 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
 
 #endif // #if defined(CTR) && (CTR == 1)
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif // _AES_H_

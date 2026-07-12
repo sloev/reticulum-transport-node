@@ -2,98 +2,172 @@
 #include "RetiCrypto.h"
 #include "RetiPacket.h"
 #include "RetiIdentity.h"
-#include <time.h>
 
 namespace Reticulum {
+
+// Only the RNS default link mode is implemented -- see RNS.Link.MODE_AES256_CBC.
+const uint8_t LINK_MODE_AES256_CBC = 0x01;
+const size_t LINK_ECPUBSIZE = 64; // x25519 pub(32) + ed25519 pub(32), per RNS.Link.ECPUBSIZE
+
+// This firmware only ever answers incoming link requests (it never
+// initiates links to other nodes), so this implements RNS.Link's responder
+// role only: validate_request() -> handshake() -> prove(), then
+// encrypt()/decrypt() over the established link, plus LINKIDENTIFY and
+// LINKCLOSE handling. There is no outbound-link / initiator code path.
 class Link {
 public:
-    bool active = false;
-    std::vector<uint8_t> remote_addr;
-    std::vector<uint8_t> enc_key, auth_key;
-    std::vector<uint8_t> req_hash;
-    std::vector<uint8_t> my_pub, my_priv;
+    enum Status { HANDSHAKE, ACTIVE, CLOSED };
+    Status status = HANDSHAKE;
 
-    Link(std::vector<uint8_t> peer) : remote_addr(peer) { 
-        Crypto::genKeys(my_pub, my_priv); 
+    std::vector<uint8_t> linkId;      // 16 bytes
+    std::vector<uint8_t> peerXPub;    // peer's ephemeral X25519 public key (32 bytes)
+    std::vector<uint8_t> peerEdPub;   // peer's static Ed25519 public key, from the LR payload (32 bytes)
+    std::vector<uint8_t> myXPub, myXPriv; // our ephemeral X25519 keypair (32 bytes each)
+
+    std::vector<uint8_t> signingKey, encryptionKey; // Token halves, 32 bytes each (AES-256)
+
+    // Set once a LINKIDENTIFY packet from the peer has been verified --
+    // Stage 5 (LXMF) uses this to authorize/attribute propagation requests.
+    bool remoteIdentified = false;
+    std::vector<uint8_t> remoteIdentityHash; // 16 bytes
+
+    unsigned long lastInbound = 0;
+
+    // RNS.Link.link_id_from_lr_packet: truncated_hash(hashable_part), with
+    // any trailing MTU-signalling bytes beyond the 64-byte ephemeral pubkey
+    // block stripped first.
+    static std::vector<uint8_t> linkIdFromRequest(const Packet& lrPacket) {
+        std::vector<uint8_t> hashable = lrPacket.getHashablePart();
+        if (lrPacket.data.size() > LINK_ECPUBSIZE) {
+            size_t diff = lrPacket.data.size() - LINK_ECPUBSIZE;
+            if (diff < hashable.size()) hashable.resize(hashable.size() - diff);
+        }
+        std::vector<uint8_t> h = Crypto::sha256(hashable);
+        h.resize(16);
+        return h;
     }
 
-    void accept(std::vector<uint8_t> peer_pub, std::vector<uint8_t> salt) {
-        req_hash = salt;
-        std::vector<uint8_t> shared = Crypto::x25519_shared(my_priv, peer_pub);
-        std::vector<uint8_t> derived = Crypto::hkdf(shared, req_hash, 64);
-        
-        enc_key.assign(derived.begin(), derived.begin()+32);
-        auth_key.assign(derived.begin()+32, derived.end());
-        active = true;
+    // Link.signalling_bytes(mtu, mode): 3 bytes, top 3 bits of byte[0] carry
+    // the mode, the remaining 21 bits carry the MTU.
+    static std::vector<uint8_t> signallingBytes(uint32_t mtu, uint8_t mode) {
+        uint32_t value = (mtu & 0x1FFFFF) | (((uint32_t)(mode << 5) & 0xE0) << 16);
+        return { (uint8_t)((value >> 16) & 0xFF), (uint8_t)((value >> 8) & 0xFF), (uint8_t)(value & 0xFF) };
     }
 
-    Packet createProof(Identity* id) {
+    // Validates and accepts an incoming link request: derives the link ID,
+    // generates our ephemeral X25519 keypair, and performs the ECDH+HKDF
+    // handshake -- see RNS.Link.validate_request()/handshake(). Returns
+    // nullptr if the request is malformed.
+    static Link* accept(const Packet& lrPacket) {
+        if (lrPacket.type != LINK_REQ) return nullptr;
+        if (lrPacket.data.size() < LINK_ECPUBSIZE) return nullptr;
+
+        Link* link = new Link();
+        link->linkId = linkIdFromRequest(lrPacket);
+        link->peerXPub.assign(lrPacket.data.begin(), lrPacket.data.begin() + 32);
+        link->peerEdPub.assign(lrPacket.data.begin() + 32, lrPacket.data.begin() + 64);
+
+        Crypto::genKeys(link->myXPub, link->myXPriv);
+
+        std::vector<uint8_t> shared = Crypto::x25519_shared(link->myXPriv, link->peerXPub);
+        // RNS.Link.get_salt(): salt = link_id.
+        std::vector<uint8_t> derived = Crypto::hkdf(shared, link->linkId, 64);
+        link->signingKey.assign(derived.begin(), derived.begin() + 32);
+        link->encryptionKey.assign(derived.begin() + 32, derived.end());
+
+        link->status = ACTIVE;
+        link->lastInbound = millis();
+        return link;
+    }
+
+    // Builds the LRPROOF packet: RNS.Link.prove(): signed_data =
+    // link_id || x_pub || sig_pub || signalling_bytes, signed with the
+    // *node's own static identity* (a Link's signing key is always the
+    // owner's real Ed25519 key, not a fresh ephemeral one -- see
+    // RNS.Link.__init__: "self.sig_prv = self.owner.identity.sig_prv").
+    // proof_data = signature || x_pub || signalling_bytes (sig_pub is
+    // deliberately not retransmitted: the initiator already resolved it via
+    // the destination's earlier announce).
+    Packet buildProof(Identity* id, uint32_t mtu = 500) const {
+        std::vector<uint8_t> signalling = signallingBytes(mtu, LINK_MODE_AES256_CBC);
+        std::vector<uint8_t> sigPub = id->getEd25519PublicKey();
+
+        std::vector<uint8_t> signedData = linkId;
+        signedData.insert(signedData.end(), myXPub.begin(), myXPub.end());
+        signedData.insert(signedData.end(), sigPub.begin(), sigPub.end());
+        signedData.insert(signedData.end(), signalling.begin(), signalling.end());
+        std::vector<uint8_t> sig = id->sign(signedData);
+
         Packet p;
-        if(!active) return p;
         p.type = PROOF;
-        p.destType = LINK;
-        p.addresses.assign(req_hash.begin(), req_hash.begin()+16); // Link ID
-        
-        // Payload is the signature of the link request hash
-        // We append our ephemeral public key to the payload so the client can derive the symmetric key
-        std::vector<uint8_t> payload = my_pub;
-        std::vector<uint8_t> sig = id->sign(req_hash);
-        payload.insert(payload.end(), sig.begin(), sig.end());
-        
-        p.data = payload;
+        p.context = CTX_LRPROOF;
+        p.addresses = linkId;
+        p.data = sig;
+        p.data.insert(p.data.end(), myXPub.begin(), myXPub.end());
+        p.data.insert(p.data.end(), signalling.begin(), signalling.end());
         return p;
     }
 
-    Packet encrypt(std::vector<uint8_t> payload, uint8_t context=0) {
-        if(!active) return Packet();
+    // Token-wraps plaintext for transmission over this link. The context
+    // byte lives on the outer Packet (see wrapData()), not inside the
+    // ciphertext -- RNS.Link.encrypt() is just Token.encrypt().
+    std::vector<uint8_t> encrypt(const std::vector<uint8_t>& plaintext) const {
+        if (status != ACTIVE) return std::vector<uint8_t>();
+        return Crypto::tokenEncrypt(signingKey, encryptionKey, plaintext);
+    }
 
-        // 1. AES-128-CBC
-        std::vector<uint8_t> iv(16);
-        for(int i=0; i<16; i++) iv[i] = (uint8_t)RETI_RANDOM();
+    // Returns the decrypted plaintext, or empty if the token doesn't verify.
+    std::vector<uint8_t> decrypt(const std::vector<uint8_t>& tokenBytes) const {
+        if (status != ACTIVE) return std::vector<uint8_t>();
+        return Crypto::tokenDecrypt(signingKey, encryptionKey, tokenBytes);
+    }
 
-        std::vector<uint8_t> pt = {context};
-        pt.insert(pt.end(), payload.begin(), payload.end());
-        std::vector<uint8_t> ct = Crypto::aes_encrypt(enc_key, iv, pt);
-
-        // 2. Fernet Token: [0x80] [TS] [IV] [Cipher] [HMAC]
-        std::vector<uint8_t> t;
-        t.reserve(57 + ct.size());
-        
-        t.push_back(0x80); 
-
-        time_t now; time(&now);
-        uint64_t ts = (now > 1672531200) ? (uint64_t)now : 0; 
-        for(int i=7; i>=0; i--) t.push_back((ts >> (i*8)) & 0xFF);
-
-        t.insert(t.end(), iv.begin(), iv.end());
-        t.insert(t.end(), ct.begin(), ct.end());
-
-        std::vector<uint8_t> mac = Crypto::hmac_sha256(auth_key, t);
-        t.insert(t.end(), mac.begin(), mac.end());
-
+    // Convenience: builds a DATA packet addressed to this link with the
+    // given plaintext encrypted and the given context set on the packet
+    // itself (RNS.Packet.NONE for plain data, CTX_REQUEST/CTX_RESPONSE for
+    // the request layer, etc).
+    Packet wrapData(const std::vector<uint8_t>& plaintext, uint8_t context = CTX_NONE) const {
         Packet p;
         p.type = DATA;
         p.destType = LINK;
-        p.addresses = remote_addr;
-        p.data = t;
+        p.addresses = linkId;
+        p.context = context;
+        p.data = encrypt(plaintext);
         return p;
     }
 
-    std::vector<uint8_t> decrypt(std::vector<uint8_t> cipherData) {
-        if(!active || cipherData.size() < 57) return std::vector<uint8_t>();
-        
-        // Basic Fernet validation (normally check HMAC here)
-        if(cipherData[0] != 0x80) return std::vector<uint8_t>();
+    // Verifies an inbound LINKIDENTIFY packet (RNS.Link.identify()):
+    // plaintext = pubkey(64) || sig(64), signed_data = link_id || pubkey.
+    // On success, remoteIdentityHash is set to SHA256(pubkey)[:16].
+    bool handleIdentify(const std::vector<uint8_t>& tokenBytes) {
+        std::vector<uint8_t> plaintext = decrypt(tokenBytes);
+        if (plaintext.size() != 64 + 64) return false;
 
-        std::vector<uint8_t> iv(cipherData.begin() + 9, cipherData.begin() + 25);
-        std::vector<uint8_t> ct(cipherData.begin() + 25, cipherData.end() - 32); // Exclude HMAC
+        std::vector<uint8_t> pub(plaintext.begin(), plaintext.begin() + 64);
+        std::vector<uint8_t> sig(plaintext.begin() + 64, plaintext.end());
 
-        std::vector<uint8_t> pt = Crypto::aes_decrypt(enc_key, iv, ct);
+        std::vector<uint8_t> signedData = linkId;
+        signedData.insert(signedData.end(), pub.begin(), pub.end());
 
-        // Strip context byte
-        if(pt.size() > 0) pt.erase(pt.begin());
+        std::vector<uint8_t> edPub(pub.begin() + 32, pub.end());
+        if (crypto_ed25519_check(sig.data(), edPub.data(), signedData.data(), signedData.size()) != 0) {
+            return false;
+        }
 
-        return pt;
+        std::vector<uint8_t> hash = Crypto::sha256(pub);
+        remoteIdentityHash.assign(hash.begin(), hash.begin() + 16);
+        remoteIdentified = true;
+        return true;
+    }
+
+    void handleClose() { status = CLOSED; }
+
+    // Any inbound packet on this link (data, keepalive, etc) refreshes
+    // liveness -- see RNS.Link.receive()/last_inbound.
+    void touch() { lastInbound = millis(); }
+
+    bool isStale(unsigned long staleAfterMs = 300000) const {
+        return status == ACTIVE && (millis() - lastInbound) > staleAfterMs;
     }
 };
 }

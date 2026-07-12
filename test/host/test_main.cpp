@@ -18,6 +18,7 @@
 #include "RetiDestination.h"
 #include "RetiPacket.h"
 #include "RetiAnnounce.h"
+#include "RetiLink.h"
 
 #include <cstdio>
 
@@ -143,6 +144,85 @@ static void test_announce_validated_by_construction() {
     checkHexEq(announcedPub, TestVectors::IDENTITY_PUBLIC_KEY_HEX, "announced public key matches RNS");
 }
 
+static void test_token_decrypt() {
+    // Decrypt direction is fully deterministic (no IV to generate), so this
+    // is checked byte-exact. Encrypt direction is covered structurally by
+    // the round-trip test below, since its IV is randomly generated.
+    std::printf("test_token_decrypt\n");
+    auto signingKey = hexToBytes(TestVectors::TOKEN_SIGNING_KEY_HEX);
+    auto encryptionKey = hexToBytes(TestVectors::TOKEN_ENCRYPTION_KEY_HEX);
+    auto token = hexToBytes(TestVectors::TOKEN_HEX);
+
+    auto plain = Crypto::tokenDecrypt(signingKey, encryptionKey, token);
+    checkHexEq(plain, TestVectors::TOKEN_PLAINTEXT_HEX, "Crypto::tokenDecrypt matches RNS Token plaintext");
+
+    // Tampering with any byte must be rejected by the HMAC check.
+    auto tampered = token;
+    tampered[0] ^= 0xFF;
+    check(Crypto::tokenDecrypt(signingKey, encryptionKey, tampered).empty(),
+          "Crypto::tokenDecrypt rejects a tampered token");
+}
+
+static void test_token_round_trip() {
+    std::printf("test_token_round_trip\n");
+    auto signingKey = hexToBytes(TestVectors::TOKEN_SIGNING_KEY_HEX);
+    auto encryptionKey = hexToBytes(TestVectors::TOKEN_ENCRYPTION_KEY_HEX);
+    std::vector<uint8_t> plaintext = {'r', 'o', 'u', 'n', 'd', '-', 't', 'r', 'i', 'p'};
+
+    auto token = Crypto::tokenEncrypt(signingKey, encryptionKey, plaintext);
+    auto decrypted = Crypto::tokenDecrypt(signingKey, encryptionKey, token);
+    check(decrypted == plaintext, "tokenEncrypt -> tokenDecrypt round trip");
+}
+
+static void test_link_id_from_request() {
+    std::printf("test_link_id_from_request\n");
+    Packet lr = Packet::parse(hexToBytes(TestVectors::LINK_RAW_LR_PACKET_HEX));
+    check(lr.type == LINK_REQ, "parsed packet is a LINK_REQ");
+
+    auto linkId = Link::linkIdFromRequest(lr);
+    checkHexEq(linkId, TestVectors::LINK_ID_HEX, "Link::linkIdFromRequest matches RNS.Link.link_id_from_lr_packet");
+}
+
+static void test_link_signalling_bytes() {
+    std::printf("test_link_signalling_bytes\n");
+    auto signalling = Link::signallingBytes(TestVectors::LINK_SIGNALLING_MTU, TestVectors::LINK_SIGNALLING_MODE);
+    checkHexEq(signalling, TestVectors::LINK_SIGNALLING_BYTES_HEX, "Link::signallingBytes matches RNS.Link.signalling_bytes");
+}
+
+static void test_link_accept_and_proof() {
+    std::printf("test_link_accept_and_proof\n");
+    Packet lr = Packet::parse(hexToBytes(TestVectors::LINK_RAW_LR_PACKET_HEX));
+    Link* link = Link::accept(lr);
+    check(link != nullptr, "Link::accept succeeds on a real LR packet");
+    if (!link) return;
+
+    checkHexEq(link->linkId, TestVectors::LINK_ID_HEX, "accepted link's linkId matches RNS");
+    check(link->status == Link::ACTIVE, "accepted link is ACTIVE");
+    check(link->signingKey.size() == 32 && link->encryptionKey.size() == 32,
+          "accepted link derived 32-byte signing/encryption keys");
+
+    Identity serverId(hexToBytes(TestVectors::LINK_SERVER_IDENTITY_PRIVATE_HEX));
+    Packet proof = link->buildProof(&serverId, TestVectors::LINK_SIGNALLING_MTU);
+    check(proof.type == PROOF, "proof packet type is PROOF");
+    check(proof.context == CTX_LRPROOF, "proof context is LRPROOF");
+    checkHexEq(proof.addresses, TestVectors::LINK_ID_HEX, "proof is addressed to the link ID");
+    check(proof.data.size() == 64 + 32 + 3, "proof payload is sig(64) || x_pub(32) || signalling(3)");
+
+    // The proof must self-verify: signed_data = link_id || x_pub || sig_pub || signalling.
+    std::vector<uint8_t> sig(proof.data.begin(), proof.data.begin() + 64);
+    std::vector<uint8_t> xPub(proof.data.begin() + 64, proof.data.begin() + 96);
+    std::vector<uint8_t> signalling(proof.data.begin() + 96, proof.data.end());
+    std::vector<uint8_t> sigPub = serverId.getEd25519PublicKey();
+
+    std::vector<uint8_t> signedData = link->linkId;
+    signedData.insert(signedData.end(), xPub.begin(), xPub.end());
+    signedData.insert(signedData.end(), sigPub.begin(), sigPub.end());
+    signedData.insert(signedData.end(), signalling.begin(), signalling.end());
+
+    int ok = crypto_ed25519_check(sig.data(), sigPub.data(), signedData.data(), signedData.size());
+    check(ok == 0, "proof signature self-verifies against the server identity");
+}
+
 int main() {
     test_hex_roundtrip();
     test_x25519_shared_secret();
@@ -152,6 +232,11 @@ int main() {
     test_destination_hash();
     test_packet_parse_cases();
     test_announce_validated_by_construction();
+    test_token_decrypt();
+    test_token_round_trip();
+    test_link_id_from_request();
+    test_link_signalling_bytes();
+    test_link_accept_and_proof();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -239,6 +239,17 @@ def vec_token_aes256():
     }
 
 
+def vec_link_signalling():
+    mtu = RNS.Reticulum.MTU  # 500
+    mode = RNS.Link.MODE_AES256_CBC
+    signalling = RNS.Link.signalling_bytes(mtu, mode)
+    return {
+        "mtu": mtu,
+        "mode": mode,
+        "signalling_bytes": hx(signalling),
+    }
+
+
 def vec_link_request(reticulum):
     captured = []
     RNS.Transport.outbound = staticmethod(lambda packet: captured.append(packet.raw) or True)
@@ -344,6 +355,12 @@ def emit_cpp_header(vectors, path):
     lines.append(f'constexpr const char* LINK_ID_HEX = {_cstr(lr["link_id"])};')
     lines.append("")
 
+    lsig = vectors["link_signalling"]
+    lines.append(f'constexpr int LINK_SIGNALLING_MTU = {lsig["mtu"]};')
+    lines.append(f'constexpr int LINK_SIGNALLING_MODE = {lsig["mode"]};')
+    lines.append(f'constexpr const char* LINK_SIGNALLING_BYTES_HEX = {_cstr(lsig["signalling_bytes"])};')
+    lines.append("")
+
     lines.append("struct PacketCase {")
     lines.append("    const char* name;")
     lines.append("    const char* raw_hex;")
@@ -394,6 +411,7 @@ def main():
         hkdf_vec = vec_hkdf()
         token_vec = vec_token_aes256()
         link_vec = vec_link_request(reticulum)
+        link_signalling = vec_link_signalling()
 
     vectors = {
         "rns_version": RNS_VERSION,
@@ -405,6 +423,7 @@ def main():
         "hkdf": hkdf_vec,
         "token_aes256": token_vec,
         "link_request": link_vec,
+        "link_signalling": link_signalling,
     }
 
     json.dump(vectors, sys.stdout, indent=2)

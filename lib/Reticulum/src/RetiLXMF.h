@@ -39,20 +39,15 @@ public:
         // Handle Link Requests for Synchronization
         if (p.type == LINK_REQ) {
             RNS_LOG("LXMF: Received LINK_REQ. Establishing Sync Link.");
-            if (p.data.size() >= 32) {
-                std::vector<uint8_t> peer_pub(p.data.begin(), p.data.begin()+32);
-                std::vector<uint8_t> req_hash = Crypto::sha256(rawPacket); // Simplified hash
-
-                Link* syncLink = new Link(p.addresses);
-                syncLink->accept(peer_pub, req_hash);
-
+            Link* syncLink = Link::accept(p);
+            if (syncLink) {
                 // Create and send PROOF packet
-                Packet proof = syncLink->createProof(id);
+                Packet proof = syncLink->buildProof(id);
                 // We would normally pass this back to the router to transmit
                 // For this embedded LXMF layer, we assume the router will pick it up or we call interface->send()
                 // Here we just log its successful generation.
                 RNS_LOG("LXMF: Link established. PROOF generated.");
-                
+
                 // Keep the link object for the incoming SYNC request
                 activeSyncLinks.push_back(syncLink);
             }
@@ -62,13 +57,14 @@ public:
         // Handle incoming data over an established Link (The Sync Request)
         if (p.type == DATA && p.destType == LINK) {
             for (auto* link : activeSyncLinks) {
-                // Link ID is the first 16 bytes of req_hash
+                // Link ID is the first 16 bytes of the link's own linkId
                 bool match = true;
                 for (size_t i = 0; i < 16 && i < p.addresses.size(); i++) {
-                    if (p.addresses[i] != link->req_hash[i]) { match = false; break; }
+                    if (p.addresses[i] != link->linkId[i]) { match = false; break; }
                 }
-                
+
                 if (match) {
+                    link->touch();
                     std::vector<uint8_t> plain = link->decrypt(p.data);
                     if (plain.size() > 0) {
                         RNS_LOG("LXMF: Decrypted Sync Request payload.");
@@ -133,10 +129,10 @@ public:
                 }
                 
                 // Encrypt payload and send (in a production environment, chunking is required)
-                Packet p = link->encrypt(payload, 0);
-                if (p.data.size() > 0) {
+                Packet outPacket = link->wrapData(payload, CTX_NONE);
+                if (outPacket.data.size() > 0) {
                     // Send back to srcIface (would require Interface API hook here)
-                    // srcIface->send(p.serialize());
+                    // srcIface->send(outPacket.serialize());
                 }
             }
 #if defined(BOARD_SENSECAP_T1000)

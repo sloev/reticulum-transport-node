@@ -7,9 +7,8 @@
 
 #if defined(BOARD_SENSECAP_T1000) || defined(RNSC_HOST_TEST)
 // The Adafruit nRF52 core has no mbedTLS, so SHA-256/AES are vendored instead.
-extern "C" {
+// aes.h self-guards with extern "C" (see lib/TinyAES/aes.h).
 #include "aes.h"
-}
 #include "sha256.h"
 #else
 #include "mbedtls/md.h"
@@ -151,6 +150,51 @@ public:
             }
         }
         return plain;
+    }
+
+    static bool constantTimeEqual(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+        if (a.size() != b.size()) return false;
+        uint8_t diff = 0;
+        for (size_t i = 0; i < a.size(); i++) diff |= (a[i] ^ b[i]);
+        return diff == 0;
+    }
+
+    // RNS.Cryptography.Token: IV(16) || AES-CBC(PKCS7(plaintext)) ||
+    // HMAC-SHA256(signingKey, IV||ciphertext)(32). No version byte, no
+    // timestamp (unlike classic Fernet, which this deliberately isn't).
+    static std::vector<uint8_t> tokenEncrypt(const std::vector<uint8_t>& signingKey,
+                                              const std::vector<uint8_t>& encryptionKey,
+                                              const std::vector<uint8_t>& plaintext) {
+        std::vector<uint8_t> iv(16);
+        for (int i = 0; i < 16; i++) iv[i] = (uint8_t)RETI_RANDOM();
+
+        std::vector<uint8_t> ct = aes_encrypt(encryptionKey, iv, plaintext);
+
+        std::vector<uint8_t> signedParts = iv;
+        signedParts.insert(signedParts.end(), ct.begin(), ct.end());
+
+        std::vector<uint8_t> mac = hmac_sha256(signingKey, signedParts);
+        std::vector<uint8_t> token = signedParts;
+        token.insert(token.end(), mac.begin(), mac.end());
+        return token;
+    }
+
+    // Returns the decrypted plaintext, or an empty vector if the token is
+    // malformed or the HMAC doesn't verify. The HMAC is checked *before* any
+    // decryption is attempted or trusted (Token.decrypt semantics).
+    static std::vector<uint8_t> tokenDecrypt(const std::vector<uint8_t>& signingKey,
+                                              const std::vector<uint8_t>& encryptionKey,
+                                              const std::vector<uint8_t>& token) {
+        if (token.size() <= 16 + 32) return std::vector<uint8_t>(); // IV + at least 1 AES block + HMAC
+
+        std::vector<uint8_t> signedParts(token.begin(), token.end() - 32);
+        std::vector<uint8_t> mac(token.end() - 32, token.end());
+        std::vector<uint8_t> expectedMac = hmac_sha256(signingKey, signedParts);
+        if (!constantTimeEqual(mac, expectedMac)) return std::vector<uint8_t>();
+
+        std::vector<uint8_t> iv(token.begin(), token.begin() + 16);
+        std::vector<uint8_t> ct(token.begin() + 16, token.end() - 32);
+        return aes_decrypt(encryptionKey, iv, ct);
     }
 };
 }
