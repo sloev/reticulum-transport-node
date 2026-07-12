@@ -1,6 +1,7 @@
 #pragma once
 #include "RetiCommon.h"
 #include "RetiIdentity.h"
+#include "RetiDestination.h"
 #include "RetiPacket.h"
 #include "RetiLink.h"
 #include <ArduinoJson.h>
@@ -9,22 +10,16 @@ namespace Reticulum {
 
 class LXMFPropagationNode {
 public:
-    std::vector<uint8_t> propHash;
+    std::vector<uint8_t> nameHash;  // 10 bytes: SHA256("lxmf.propagation")[:10]
+    std::vector<uint8_t> propHash;  // 16 bytes: SHA256(nameHash || identity_hash)[:16] -- see RNS.Destination
 
     Identity* id;
     std::vector<Link*> activeSyncLinks;
 
     LXMFPropagationNode(Identity* node_id) : id(node_id) {
-        // In RNS, Single destination hash = SHA256(app_name_hash + aspect_hash + pub_key)
-        // For demonstration, we simply derive a 16-byte hash based on our identity
-        std::vector<uint8_t> pub = id->getPublicKey();
-        String prefix = "lxmf.propagation";
-        std::vector<uint8_t> buf(prefix.c_str(), prefix.c_str() + prefix.length());
-        buf.insert(buf.end(), pub.begin(), pub.end());
-        
-        std::vector<uint8_t> fullHash = Crypto::sha256(buf);
-        propHash.assign(fullHash.begin(), fullHash.begin() + 16);
-        
+        nameHash = Destination::nameHash("lxmf", "propagation");
+        propHash = Destination::hash(nameHash, id->getAddress());
+
         if (!LittleFS.exists("/lxmf")) {
             LittleFS.mkdir("/lxmf");
         }

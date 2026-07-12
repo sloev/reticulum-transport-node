@@ -1,6 +1,7 @@
 // Public-domain SHA-256 (Brad Conte, https://github.com/B-Con/crypto-algorithms),
-// vendored for BOARD_SENSECAP_T1000: the Adafruit nRF52 core has no mbedTLS.
-#if defined(BOARD_SENSECAP_T1000)
+// vendored for BOARD_SENSECAP_T1000 (the Adafruit nRF52 core has no mbedTLS)
+// and for RNSC_HOST_TEST (the host test binary has no mbedTLS either).
+#if defined(BOARD_SENSECAP_T1000) || defined(RNSC_HOST_TEST)
 #include "sha256.h"
 #include <memory.h>
 
@@ -132,4 +133,4 @@ void sha256_final(SHA256_CTX *ctx, uint8_t hash[]) {
 		hash[i + 28] = (ctx->state[7] >> (24 - i * 8)) & 0x000000ff;
 	}
 }
-#endif // BOARD_SENSECAP_T1000
+#endif // BOARD_SENSECAP_T1000 || RNSC_HOST_TEST

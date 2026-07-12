@@ -5,7 +5,7 @@
 #include "monocypher.h"
 #include "monocypher-ed25519.h"
 
-#if defined(BOARD_SENSECAP_T1000)
+#if defined(BOARD_SENSECAP_T1000) || defined(RNSC_HOST_TEST)
 // The Adafruit nRF52 core has no mbedTLS, so SHA-256/AES are vendored instead.
 extern "C" {
 #include "aes.h"
@@ -21,7 +21,7 @@ class Crypto {
 public:
     static std::vector<uint8_t> sha256(const std::vector<uint8_t>& input) {
         std::vector<uint8_t> out(32);
-#if defined(BOARD_SENSECAP_T1000)
+#if defined(BOARD_SENSECAP_T1000) || defined(RNSC_HOST_TEST)
         SHA256_CTX ctx;
         sha256_init(&ctx);
         sha256_update(&ctx, input.data(), input.size());
@@ -39,7 +39,7 @@ public:
     }
 
     static std::vector<uint8_t> hmac_sha256(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data) {
-#if defined(BOARD_SENSECAP_T1000)
+#if defined(BOARD_SENSECAP_T1000) || defined(RNSC_HOST_TEST)
         // No hardware/mbedTLS HMAC helper on this core; do it by hand from sha256().
         std::vector<uint8_t> k = key;
         if(k.size() > 64) k = sha256(k);
@@ -108,15 +108,18 @@ public:
         std::vector<uint8_t> out(padLen);
         uint8_t ivc[16]; memcpy(ivc, iv.data(), 16);
 
-#if defined(BOARD_SENSECAP_T1000)
+#if defined(BOARD_SENSECAP_T1000) || defined(RNSC_HOST_TEST)
         struct AES_ctx ctx;
         AES_init_ctx_iv(&ctx, key.data(), ivc);
         memcpy(out.data(), in.data(), padLen);
         AES_CBC_encrypt_buffer(&ctx, out.data(), padLen);
 #else
+        // RNS's default link mode is AES-256-CBC (Link.MODE_AES256_CBC); the
+        // 64-byte HKDF-derived link key splits into a 32-byte signing key and
+        // a 32-byte (256-bit) encryption key -- see RetiLink.h.
         mbedtls_aes_context aes;
         mbedtls_aes_init(&aes);
-        mbedtls_aes_setkey_enc(&aes, key.data(), 128);
+        mbedtls_aes_setkey_enc(&aes, key.data(), 256);
         mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_ENCRYPT, padLen, ivc, in.data(), out.data());
         mbedtls_aes_free(&aes);
 #endif
@@ -127,7 +130,7 @@ public:
         std::vector<uint8_t> plain(cipher.size());
         uint8_t ivc[16]; memcpy(ivc, iv.data(), 16);
 
-#if defined(BOARD_SENSECAP_T1000)
+#if defined(BOARD_SENSECAP_T1000) || defined(RNSC_HOST_TEST)
         struct AES_ctx ctx;
         AES_init_ctx_iv(&ctx, key.data(), ivc);
         memcpy(plain.data(), cipher.data(), cipher.size());
@@ -135,7 +138,7 @@ public:
 #else
         mbedtls_aes_context aes;
         mbedtls_aes_init(&aes);
-        mbedtls_aes_setkey_dec(&aes, key.data(), 128);
+        mbedtls_aes_setkey_dec(&aes, key.data(), 256);
         mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, cipher.size(), ivc, cipher.data(), plain.data());
         mbedtls_aes_free(&aes);
 #endif

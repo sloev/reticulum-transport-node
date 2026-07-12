@@ -72,8 +72,8 @@ void setup() {
         lxmfNode->handleIncoming(raw, p);
     };
 
-    router->sendAnnounce();
-    
+    router->sendAnnounce(lxmfNode->propHash, lxmfNode->nameHash);
+
     RNS_LOG("RNS Node Online. Addr: %s", Reticulum::toHex(id->getAddress()).c_str());
 }
 
