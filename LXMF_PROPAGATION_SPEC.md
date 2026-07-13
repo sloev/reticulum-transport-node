@@ -21,7 +21,7 @@ and broadcasts an announce on boot carrying the LXMF propagation-node
 stamp_cost, metadata]`) that Sideband and NomadNet check before listing an
 announce as a real PN, not just any destination.
 
-## Inbound message handling — done (single-packet uploads only)
+## Inbound message handling — done
 
 A client uploads a message over an established Link to the propagation
 destination, not as a plain packet addressed to the destination hash
@@ -52,10 +52,14 @@ method=PROPAGATED, representation=PACKET, the client sends a plain
 **Size limit, stated plainly:** LXMF only uses the single-packet path
 above when the message content fits in 319 bytes
 (`LXMessage.LINK_PACKET_MAX_CONTENT`). Anything longer — or carrying an
-attachment — gets sent as a Resource upload instead, which this firmware
-can't accept (see `COMPLIANCE.md` section 7: send-only Resource support).
-Short text messages sync correctly; longer messages will fail to upload
-until Resource-receive is built.
+attachment — gets sent as a Resource upload instead. This firmware
+accepts that too now (`handleInboundResourceAdvertisement`/
+`handleInboundResourcePart` in `RetiLXMF.h`, built on `RetiResource.h`'s
+receive-side state machine), within a documented size ceiling: single
+segment, single hashmap page, roughly 34KB with RNS's default link MDU —
+see `COMPLIANCE.md` section 7. Both paths funnel into the same
+`processMessageArray` cache logic, so list/get/purge behave identically
+regardless of how a message arrived.
 
 ## Sync protocol — done
 
@@ -75,6 +79,38 @@ LINKIDENTIFY, then issues `MESSAGE_GET` requests over Request/Response
 An unidentified link gets nothing back from `/get` — there's no
 delivery hash to attribute a list or fetch to.
 
+## Peer-to-peer sync — receiving half done
+
+Real propagation nodes gossip their caches with each other over `/offer`
+so a message reaches every PN a recipient might check, not just the one
+their sender happened to upload to. This firmware implements the half of
+that where another PN (or peer) pushes messages *into* this node's cache
+(`handleOffer` in `RetiLXMF.h`), matching `LXMPeer.offer_request`:
+
+1. Requires LINKIDENTIFY, same as `/get` — an unidentified offer gets
+   `ERROR_NO_IDENTITY` (`0xf0`), not a real answer.
+2. `data = [peering_key, transient_ids]`. The `peering_key` is read and
+   discarded: real peers PoW-stamp it to satisfy the receiving node's
+   declared peering cost (`LXStamper.validate_peering_key`), but this
+   node always announces `peering_cost=0`, and at cost 0 that validation
+   is unconditionally true no matter what the key contains — there's
+   nothing to check.
+3. Responds `false` (already have everything offered), `true` (want
+   everything), or an array of just the transient IDs not already
+   cached — the exact three-way contract `LXMPeer.offer_response`
+   expects.
+4. Whatever gets accepted always arrives as a Resource next
+   (`LXMPeer.offer_response` never uses a plain packet, regardless of
+   size), so it's handled by the same Resource-receive path as a large
+   direct upload — see the section above.
+
+**Not built: this node offering its own cache to other PNs.** Outbound
+peering would mean generating a valid peering key against *each peer's*
+own declared cost, which could be nonzero — real proof-of-work this
+firmware doesn't implement (see the anti-spam stamps note below; it's the
+same underlying mechanism). This node is a receiver in the peer mesh, not
+yet a participant that pushes outward.
+
 ## What's deliberately not built
 
 - **Anti-spam stamps (`LXStamper`).** RNS's PoW-based anti-spam layer
@@ -82,17 +118,14 @@ delivery hash to attribute a list or fetch to.
   messages and doesn't check for one. It's built to be one person's
   private courier, reachable by a small known set of correspondents —
   not an open relay on a public mesh. Don't treat it as one.
-- **Peer-to-peer propagation sync (the `/offer` path).** Real PNs gossip
-  their caches with each other so a message reaches every PN a
-  recipient might check. This node only serves the client directly;
-  it doesn't participate in that gossip.
-- **Ratcheted announces.** Not implemented at the announce layer in
-  general — see `COMPLIANCE.md` section 3.
+- **Outbound peer sync.** See above — this node accepts what other PNs
+  offer it, but doesn't offer its own cache back.
 - **Access control / whitelisting.** An earlier draft of this document
   described an admin whitelist gating what gets cached. That was never
   built, and isn't present now — every message addressed to the
-  propagation destination is cached. If you need to restrict who can
-  fill your device's flash, that's still open work.
+  propagation destination is cached (or offered and accepted via
+  `/offer`). If you need to restrict who can fill your device's flash,
+  that's still open work.
 
 ## Storage layout (as built, not as originally planned)
 

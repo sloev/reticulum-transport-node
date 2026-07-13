@@ -42,7 +42,9 @@ Spec reference: [Reticulum Network Stack Manual](https://reticulum.network/manua
 | Payload shape | `pubkey(64) \|\| name_hash(10) \|\| random_hash(10) \|\| sig(64) \|\| app_data` | `RetiAnnounce.h` | **verified** |
 | Signature | over `dest_hash \|\| pubkey \|\| name_hash \|\| random_hash \|\| app_data` | `Announce::build`, cross-checked against `RNS.Identity.validate_announce` | **verified** |
 | Rebroadcast | jittered (200–1000ms) forward, not immediate, so neighbors that heard the same announce don't retransmit in lockstep | `Router::process`/`loop` | manual review (timing behavior, not vector-testable) |
-| Ratcheted announces | optional `ratchet(32)` field, ratchet key rotation | not implemented | **gap** |
+| Ratcheted announces | optional `ratchet(32)` field between `random_hash` and `sig`, `context_flag` set when present, signed data extended to include it | `Announce::build`/`validate`, `Identity::rotateRatchets`/`latestRatchetPublic` | **verified** (both directions: parses a real RNS-signed ratcheted announce, and our own construction validates) |
+| Ratchet retention/rotation | RNS retains up to 512 keys, rotates every 30 minutes, persists to a signed file | `Identity`: retains 8 (constant `RATCHET_COUNT`), same 30-minute interval, **not persisted across reboots** — see class comment in `RetiIdentity.h` | manual review; smaller retention and no persistence are deliberate embedded-resource simplifications, not wire gaps (nothing currently decrypts against this node's own identity, so there's no functional consumer yet to lose continuity for) |
+| Ratchet-aware decrypt | a receiver tries retained ratchet keys before falling back to the static key | `Identity::decrypt` | **verified** (decrypts a real RNS token that was encrypted to a ratchet key, not the static key) |
 
 ## 4. Routing
 
@@ -79,26 +81,33 @@ implemented, because nothing here needs to open a link to another node.
 
 ## 7. Resource
 
-Send side only — this firmware never accepts an inbound Resource. That's
-a real, user-visible limit, not just an internal one: LXMF only sends a
-message as a single link packet if its content fits in 319 bytes
-(`LXMessage.LINK_PACKET_MAX_CONTENT` with default RNS/LXMF parameters) —
-anything longer, or carrying an attachment, gets sent as a Resource
-upload instead, which this node has no way to receive. In practice: short
-text messages sync fine; longer messages or anything with an attachment
-sent *to* this node's propagation cache will fail to upload (the sender's
-transfer will stall/time out). This firmware also never issues outbound
-requests large enough to draw a Resource-sized response back, which is
-why the send side alone has been sufficient so far.
+Both directions now. Send side is used for oversized Request/Response
+replies; receive side is used for large LXMF propagation uploads and the
+follow-up transfer after a successful `/offer` (see section 8).
+
+Receive-side scope, stated plainly: single-segment (`i=1, l=1`) and
+single-hashmap-page transfers only — up to `HASHMAP_MAX_LEN` parts (~74
+with RNS's default link MDU, ~34KB) in one advertisement, with no support
+for `HASHMAP_IS_EXHAUSTED`/HMU pagination to request further hashmap pages
+for bigger transfers, and no multi-segment support. LXMF only sends a
+message as a single link packet at all if its content fits in 319 bytes
+(`LXMessage.LINK_PACKET_MAX_CONTENT`); anything longer goes through
+Resource, so this scope boundary is the practical ceiling on how large an
+uploaded message (or attachment) can be before this node can't accept it.
+An out-of-scope advertisement is rejected outright (`acceptAdvertisement`
+returns `nullptr`) rather than mishandled — the sender's own advertisement
+retry/timeout logic takes over, the transfer just never completes.
 
 | Component | RNS requirement | Implementation | Status |
 |---|---|---|---|
-| Payload encryption | the *whole* payload (`random_hash \|\| data`) is Token-encrypted once; the resulting stream is sliced into raw SDU-sized chunks, not re-encrypted per chunk | `Resource::create` | manual review, cross-checked against a live RNS Resource capture and `attermann/microReticulum`'s `Resource.cpp` |
-| Hash orderings | `hash = full_hash(data \|\| random_hash)`; `map_hash = full_hash(chunk \|\| random_hash)[:4]` — data and random_hash swap order between the two | `Resource::create`/`mapHash` | **verified** |
-| Advertisement | msgpack map, keys `t,d,n,h,r,o,i,l,q,f,m`, single-segment only (`i=1, l=1`) | `Resource::buildAdvertisement` | **verified** |
-| Part retransmission | `RESOURCE_REQ` → matching wanted map-hashes → resend those parts | `Resource::handleRequest` | manual review |
-| Compression | not implemented — encrypted LXMF payloads don't compress, so RNS senders skip bz2 for them in practice; flag `c` always reports 0 | n/a | **intentional gap**, documented |
-| Segmented resources | multi-segment transfer for payloads too large for one advertisement's hashmap | not implemented (this firmware's responses never get that large) | **gap** |
+| Payload encryption | the *whole* payload (`random_hash \|\| data`) is Token-encrypted once; the resulting stream is sliced into raw SDU-sized chunks, not re-encrypted per chunk | `Resource::create`/`assemble` | **verified** both directions (send: cross-checked against a live RNS Resource capture and `attermann/microReticulum`'s `Resource.cpp`; receive: round-trips through a real `RNS.ResourceAdvertisement.pack()` blob and our own send-side output) |
+| Hash orderings | `hash = full_hash(data \|\| random_hash)`; `map_hash = full_hash(chunk \|\| random_hash)[:4]` — data and random_hash swap order between the two | `Resource::create`/`mapHash`/`receivePart` | **verified** |
+| Advertisement | msgpack map, keys `t,d,n,h,r,o,i,l,q,f,m`, single-segment only (`i=1, l=1`) | `Resource::buildAdvertisement`/`acceptAdvertisement` | **verified** both directions, receive side against a real `RNS.ResourceAdvertisement.pack()` blob |
+| Part retransmission (send side) | `RESOURCE_REQ` → matching wanted map-hashes → resend those parts | `Resource::handleRequest` | manual review |
+| Part request (receive side) | requests every part of a single-page transfer in one `RESOURCE_REQ` — valid since RNS's sender fulfills an explicit request in full regardless of its own window, which only throttles *unprompted* pushes | `Resource::buildRequestForAllParts` | **verified** (round-trips against `Resource::handleRequest`, matching RNS's `Resource.request()` fulfillment behavior read from source) |
+| Receive completion / proof | `RESOURCE_PRF`: `hash(32) \|\| full_hash(data\|\|hash)(32)`, unencrypted, sent once all parts assembled and the advertised hash verifies | `Resource::assemble`/`buildReceiveProof` | **verified** against real RNS-computed hash values |
+| Compression | not implemented (send or receive) — encrypted LXMF payloads don't compress, so RNS senders' `auto_compress` never actually sticks for this data (`if compressed_size < uncompressed_size`, which encrypted/high-entropy data essentially never satisfies) — verified by reading `RNS.Resource.__init__`'s compression logic, not by testing a real compressed transfer; a compressed advertisement (flag `c` set) is rejected on receive rather than silently mishandled | n/a | **intentional gap**, documented |
+| Segmented resources / HMU hashmap pagination | multi-segment transfer, and requesting further hashmap pages for a single segment with more parts than fit in one advertisement | not implemented — see scope note above | **gap** |
 
 ## 8. LXMF Propagation Node
 
@@ -113,8 +122,12 @@ why the send side alone has been sufficient so far.
 | `MESSAGE_GET` — want/have | purge `haves`, stream `wants` within a per-call byte budget | `handleMessageGet` | manual review |
 | Link identification required | an unidentified link can't be attributed to a delivery hash, so it gets nothing | `handleMessageGet` early return | **verified** |
 | Storage quota | fixed cap (40 messages), oldest evicted first | `MAX_STORED_MESSAGES` | manual review |
+| Large uploads | representation=RESOURCE uploads (message content over 319 bytes, e.g. with an attachment) accepted via the Resource-receive path within its documented scope (section 7) | `handleInboundResourceAdvertisement`/`handleInboundResourcePart` → `processMessageArray` (shared with the direct-packet path) | **verified** end-to-end in `test_lxmf_compile.cpp`: advertisement → request → parts (fed out of order) → cached → receive proof sent |
+| `/offer` — receiving | `data=[peering_key, transient_ids]`, requires LINKIDENTIFY (else `ERROR_NO_IDENTITY`), responds `false`/`true`/an array of the transient IDs not already cached, matching `LXMPeer.offer_request`'s return contract | `handleOffer` | **verified**: unidentified-link rejection, and all three response shapes (want-none/want-all/want-some), against the exact msgpack encoding `LXMPeer.offer_response` expects |
+| `/offer` — peering key validation | real peers PoW-stamp the key to meet `LXStamper.validate_peering_key`'s target cost | not checked — this node always announces `peering_cost=0`, and at cost 0 the validation target exceeds any possible 256-bit hash, making the check unconditionally true regardless of the key's contents (read from `LXStamper.stamp_valid`'s math, not tested against a real stamped key) | **intentional gap**, documented — there's nothing to check at cost 0 |
+| `/offer` — follow-up transfer | the messages an offer accepted always arrive as a Resource (`LXMPeer.offer_response` never uses a plain packet), regardless of size | reuses the same Resource-receive path as a large direct upload | **verified** in `test_lxmf_compile.cpp` |
+| `/offer` — sending (outbound peering) | this node proactively offering its cache to other propagation nodes it discovers | not implemented — would need to generate a valid peering key against each peer's own declared (possibly nonzero) cost, real proof-of-work this firmware doesn't implement | **gap** |
 | Anti-spam stamps (`LXStamper`) | proof-of-work cost on inbound messages | not implemented — this node enforces no stamp cost and expects none | **intentional gap**, documented |
-| Peer-to-peer PN sync (`/offer`) | propagation nodes gossip caches with each other | not implemented — this node only serves clients directly | **gap** |
 | Whitelist / access control | restrict caching to known identities | not implemented — accepts anything addressed to its propagation destination | **gap** |
 
 ---
