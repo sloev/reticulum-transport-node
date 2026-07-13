@@ -94,7 +94,8 @@ public:
     // RetiAnnounce.h for the wire format (RNS.Destination.announce()).
     void sendAnnounce(const std::vector<uint8_t>& destHash, const std::vector<uint8_t>& nameHash10,
                        const std::vector<uint8_t>& appData = std::vector<uint8_t>()) {
-        Packet p = Announce::build(id, destHash, nameHash10, appData);
+        id->rotateRatchets();
+        Packet p = Announce::build(id, destHash, nameHash10, appData, id->latestRatchetPublic());
         std::vector<uint8_t> raw = p.serialize();
         for (auto* iface : interfaces) iface->send(raw);
     }

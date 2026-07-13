@@ -32,6 +32,8 @@ from RNS.vendor import umsgpack
 # straight out of sys.modules instead.
 importlib.import_module("RNS.Cryptography.Token")
 TokMod = sys.modules["RNS.Cryptography.Token"]
+importlib.import_module("RNS.Resource")
+ResourceMod = sys.modules["RNS.Resource"]
 
 RNS_VERSION = getattr(RNS, "__version__", "unknown")
 
@@ -353,6 +355,137 @@ def vec_link_request(reticulum):
     }
 
 
+def vec_resource_advertisement_receive():
+    # Ground truth for the *parser*: a real ResourceMod.ResourceAdvertisement,
+    # packed from a synthetic resource with fixed field values (no real Link
+    # needed -- ResourceAdvertisement only reads the attributes below).
+    class FakeResource:
+        pass
+
+    r = FakeResource()
+    r.size = 928              # transfer size (t)
+    r.total_size = 900        # data size (d)
+    r.hash = RNS.Identity.full_hash(b"resource-adv-test-data")
+    r.random_hash = bytes(range(4))
+    r.original_hash = r.hash
+    r.parts = [b"\x00" * 4] * 4  # n = 4
+    r.hashmap = b"".join(RNS.Identity.full_hash(bytes([i]) + r.random_hash)[:4] for i in range(4))
+    r.compressed = False
+    r.encrypted = True
+    r.split = False
+    r.has_metadata = False
+    r.segment_index = 1
+    r.total_segments = 1
+    r.request_id = None
+    r.is_response = False
+
+    adv = ResourceMod.ResourceAdvertisement(r)
+    packed = adv.pack()
+
+    # Reverse-check: unpack with the real class too, so this vector can't
+    # silently encode something RNS itself wouldn't parse back correctly.
+    reparsed = ResourceMod.ResourceAdvertisement.unpack(packed)
+    assert reparsed.h == r.hash and reparsed.n == 4 and reparsed.f == 0x01
+
+    return {
+        "packed": hx(packed),
+        "t": r.size, "d": r.total_size, "n": 4,
+        "hash": hx(r.hash), "random_hash": hx(r.random_hash),
+        "hashmap": hx(r.hashmap), "flags": reparsed.f,
+        "note": "msgpack map, keys t,d,n,h,r,o,i,l,q,f,m. flags: bit0=encrypted, "
+                "bit1=compressed, bit2=split, bit3=is_request, bit4=is_response, bit5=has_metadata.",
+    }
+
+
+def vec_resource_receive_proof():
+    # RNS.Resource.assemble()/prove(): calculated_hash = full_hash(data + random_hash),
+    # then proof = full_hash(data + hash), proof_data = hash(32) || proof(32),
+    # sent unencrypted as a PROOF packet with context RESOURCE_PRF.
+    data = b"assembled-resource-payload-bytes"
+    random_hash = bytes(range(10, 14))
+    resource_hash = RNS.Identity.full_hash(data + random_hash)
+    proof = RNS.Identity.full_hash(data + resource_hash)
+    proof_data = resource_hash + proof
+
+    return {
+        "data": hx(data),
+        "random_hash": hx(random_hash),
+        "resource_hash": hx(resource_hash),
+        "proof_data": hx(proof_data),
+    }
+
+
+def vec_ratchet_announce():
+    import tempfile
+
+    captured = []
+    RNS.Transport.outbound = staticmethod(lambda packet: captured.append(packet.raw) or True)
+
+    # A distinct identity from vec_announce()'s: RNS.Transport keeps a
+    # process-global registry keyed by destination hash, and registering two
+    # Destinations for the same identity+name/aspect raises.
+    prv_bytes = bytes((i + 1) % 256 for i in range(64))
+    identity = RNS.Identity(create_keys=False)
+    identity.load_private_key(prv_bytes)
+    destination = RNS.Destination(
+        identity, RNS.Destination.IN, RNS.Destination.SINGLE, "lxmf", "propagation"
+    )
+    with tempfile.TemporaryDirectory() as ratchet_tmp:
+        destination.enable_ratchets(os.path.join(ratchet_tmp, "ratchets"))
+
+        app_data = b"ratchet-test-app-data"
+        destination.announce(app_data=app_data)
+
+        raw = captured[0]
+        p = RNS.Packet(None, raw)
+        p.unpack()
+        valid = RNS.Identity.validate_announce(p)
+        ratchet_pub = RNS.Identity._ratchet_public_bytes(destination.ratchets[0])
+
+        return {
+            "private_key": hx(prv_bytes),
+            "app_data": hx(app_data),
+            "raw_packet": hx(raw),
+            "ratchet_public": hx(ratchet_pub),
+            "validated_by_rns": bool(valid),
+            "note": "With a ratchet, byte layout is [flags(1, context_flag set)][hops(1)]"
+                    "[dest_hash(16)][context(1)][pubkey(64)][name_hash(10)][random_hash(10)]"
+                    "[ratchet(32)][sig(64)][app_data]. signed_data = dest_hash || pubkey || "
+                    "name_hash || random_hash || ratchet || app_data.",
+        }
+
+
+def vec_ratchet_identity_encrypt():
+    # Deterministic direction only (decrypt), same rationale as vec_identity_encrypt:
+    # encrypt() uses a random ephemeral key, so only decrypt() output is checked
+    # byte-for-byte. Here the *target's* ratchet key is used instead of its
+    # static X25519 key -- proves a receiver must try retained ratchet privkeys,
+    # not just its long-term key, to decrypt this token.
+    prv_bytes = bytes(range(64))
+    identity = RNS.Identity(create_keys=False)
+    identity.load_private_key(prv_bytes)
+
+    ratchet_prv = RNS.Identity._generate_ratchet()
+    ratchet_pub = RNS.Identity._ratchet_public_bytes(ratchet_prv)
+
+    plaintext = b"ratchet-encrypted-payload-secret"
+    token = identity.encrypt(plaintext, ratchet=ratchet_pub)
+    decrypted = identity.decrypt(token, ratchets=[ratchet_prv])
+    assert decrypted == plaintext
+
+    return {
+        "identity_private_key": hx(prv_bytes),
+        "ratchet_private": hx(ratchet_prv),
+        "ratchet_public": hx(ratchet_pub),
+        "plaintext": hx(plaintext),
+        "ciphertext_token": hx(token),
+        "note": "Same Identity.encrypt()/decrypt() as vec_identity_encrypt, but the "
+                "target public key used for ECDH is a ratchet key, not the identity's "
+                "static X25519 key. A receiver must try its retained ratchet private "
+                "keys (not just its static key) to decrypt this.",
+    }
+
+
 def _cstr(s):
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -453,6 +586,40 @@ def emit_cpp_header(vectors, path):
     lines.append(f'constexpr const char* RESOURCE_MAP_HASH_HEX = {_cstr(rh["map_hash"])};')
     lines.append("")
 
+    rar = vectors["resource_adv_receive"]
+    lines.append(f'constexpr const char* RESOURCE_ADV_RECEIVE_PACKED_HEX = {_cstr(rar["packed"])};')
+    lines.append(f'constexpr int RESOURCE_ADV_RECEIVE_T = {rar["t"]};')
+    lines.append(f'constexpr int RESOURCE_ADV_RECEIVE_D = {rar["d"]};')
+    lines.append(f'constexpr int RESOURCE_ADV_RECEIVE_N = {rar["n"]};')
+    lines.append(f'constexpr const char* RESOURCE_ADV_RECEIVE_HASH_HEX = {_cstr(rar["hash"])};')
+    lines.append(f'constexpr const char* RESOURCE_ADV_RECEIVE_RANDOM_HASH_HEX = {_cstr(rar["random_hash"])};')
+    lines.append(f'constexpr const char* RESOURCE_ADV_RECEIVE_HASHMAP_HEX = {_cstr(rar["hashmap"])};')
+    lines.append(f'constexpr int RESOURCE_ADV_RECEIVE_FLAGS = {rar["flags"]};')
+    lines.append("")
+
+    rrp = vectors["resource_receive_proof"]
+    lines.append(f'constexpr const char* RESOURCE_RECEIVE_PROOF_DATA_HEX = {_cstr(rrp["data"])};')
+    lines.append(f'constexpr const char* RESOURCE_RECEIVE_PROOF_RANDOM_HASH_HEX = {_cstr(rrp["random_hash"])};')
+    lines.append(f'constexpr const char* RESOURCE_RECEIVE_PROOF_RESOURCE_HASH_HEX = {_cstr(rrp["resource_hash"])};')
+    lines.append(f'constexpr const char* RESOURCE_RECEIVE_PROOF_DATA_OUT_HEX = {_cstr(rrp["proof_data"])};')
+    lines.append("")
+
+    ratann = vectors["ratchet_announce"]
+    lines.append(f'constexpr const char* RATCHET_ANNOUNCE_PRIVATE_KEY_HEX = {_cstr(ratann["private_key"])};')
+    lines.append(f'constexpr const char* RATCHET_ANNOUNCE_APP_DATA_HEX = {_cstr(ratann["app_data"])};')
+    lines.append(f'constexpr const char* RATCHET_ANNOUNCE_RAW_PACKET_HEX = {_cstr(ratann["raw_packet"])};')
+    lines.append(f'constexpr const char* RATCHET_ANNOUNCE_RATCHET_PUBLIC_HEX = {_cstr(ratann["ratchet_public"])};')
+    lines.append(f'constexpr bool RATCHET_ANNOUNCE_VALIDATED_BY_RNS = {"true" if ratann["validated_by_rns"] else "false"};')
+    lines.append("")
+
+    rie = vectors["ratchet_identity_encrypt"]
+    lines.append(f'constexpr const char* RATCHET_IDENTITY_ENCRYPT_PRIVATE_KEY_HEX = {_cstr(rie["identity_private_key"])};')
+    lines.append(f'constexpr const char* RATCHET_IDENTITY_ENCRYPT_RATCHET_PRIVATE_HEX = {_cstr(rie["ratchet_private"])};')
+    lines.append(f'constexpr const char* RATCHET_IDENTITY_ENCRYPT_RATCHET_PUBLIC_HEX = {_cstr(rie["ratchet_public"])};')
+    lines.append(f'constexpr const char* RATCHET_IDENTITY_ENCRYPT_PLAINTEXT_HEX = {_cstr(rie["plaintext"])};')
+    lines.append(f'constexpr const char* RATCHET_IDENTITY_ENCRYPT_CIPHERTEXT_TOKEN_HEX = {_cstr(rie["ciphertext_token"])};')
+    lines.append("")
+
     lines.append("struct PacketCase {")
     lines.append("    const char* name;")
     lines.append("    const char* raw_hex;")
@@ -507,6 +674,10 @@ def main():
         request_envelope = vec_request_envelope()
         resource_hash_orderings = vec_resource_hash_orderings()
         identity_encrypt = vec_identity_encrypt()
+        resource_adv_receive = vec_resource_advertisement_receive()
+        resource_receive_proof = vec_resource_receive_proof()
+        ratchet_announce = vec_ratchet_announce()
+        ratchet_identity_encrypt = vec_ratchet_identity_encrypt()
 
     vectors = {
         "rns_version": RNS_VERSION,
@@ -522,6 +693,10 @@ def main():
         "request_envelope": request_envelope,
         "resource_hash_orderings": resource_hash_orderings,
         "identity_encrypt": identity_encrypt,
+        "resource_adv_receive": resource_adv_receive,
+        "resource_receive_proof": resource_receive_proof,
+        "ratchet_announce": ratchet_announce,
+        "ratchet_identity_encrypt": ratchet_identity_encrypt,
     }
 
     json.dump(vectors, sys.stdout, indent=2)

@@ -355,6 +355,195 @@ static void test_resource_advertisement_self_consistency() {
     check(sawTransferSize && sawParts && sawHash, "advertisement contained t/n/h fields");
 }
 
+static void test_resource_accept_advertisement_from_real_rns_bytes() {
+    std::printf("test_resource_accept_advertisement_from_real_rns_bytes\n");
+    Packet lr = Packet::parse(hexToBytes(TestVectors::LINK_RAW_LR_PACKET_HEX));
+    Link* link = Link::accept(lr);
+    check(link != nullptr, "link established for resource receive test");
+    if (!link) return;
+
+    std::vector<uint8_t> packed = hexToBytes(TestVectors::RESOURCE_ADV_RECEIVE_PACKED_HEX);
+    Resource* r = Resource::acceptAdvertisement(link, packed);
+    check(r != nullptr, "acceptAdvertisement parses a real RNS.ResourceAdvertisement.pack() blob");
+    if (!r) { delete link; return; }
+
+    check(r->transferSize == (size_t)TestVectors::RESOURCE_ADV_RECEIVE_T, "parsed 't' matches");
+    check(r->dataSize == (size_t)TestVectors::RESOURCE_ADV_RECEIVE_D, "parsed 'd' matches");
+    check(r->totalParts == (size_t)TestVectors::RESOURCE_ADV_RECEIVE_N, "parsed 'n' matches");
+    checkHexEq(r->hash, TestVectors::RESOURCE_ADV_RECEIVE_HASH_HEX, "parsed 'h' matches");
+    checkHexEq(r->randomHash, TestVectors::RESOURCE_ADV_RECEIVE_RANDOM_HASH_HEX, "parsed 'r' matches");
+    checkHexEq(r->hashmap, TestVectors::RESOURCE_ADV_RECEIVE_HASHMAP_HEX, "parsed 'm' matches");
+
+    delete r;
+    delete link;
+}
+
+static void test_resource_receive_round_trip() {
+    std::printf("test_resource_receive_round_trip\n");
+    Packet lr = Packet::parse(hexToBytes(TestVectors::LINK_RAW_LR_PACKET_HEX));
+    Link* link = Link::accept(lr);
+    check(link != nullptr, "link established for resource round trip");
+    if (!link) return;
+
+    std::vector<uint8_t> original(1200);
+    for (size_t i = 0; i < original.size(); i++) original[i] = (uint8_t)(i * 7 + 3);
+
+    Resource* sender = Resource::create(link, original);
+    Packet adv = sender->buildAdvertisement();
+    std::vector<uint8_t> advPlain = link->decrypt(adv.data);
+
+    Resource* receiver = Resource::acceptAdvertisement(link, advPlain);
+    check(receiver != nullptr, "acceptAdvertisement parses our own buildAdvertisement() output");
+    if (!receiver) { delete sender; delete link; return; }
+
+    check(receiver->totalParts == sender->totalParts, "receiver totalParts matches sender");
+    checkHexEq(receiver->hash, bytesToHex(sender->hash), "receiver hash matches sender");
+
+    Packet req = receiver->buildRequestForAllParts();
+    check(req.context == CTX_RESOURCE_REQ, "request packet context is RESOURCE_REQ");
+    std::vector<uint8_t> reqPlain = link->decrypt(req.data);
+    std::vector<Packet> parts = sender->handleRequest(reqPlain);
+    check(parts.size() == sender->totalParts, "sender answered every requested part");
+
+    // Feed parts back in reverse order -- receivePart() must place by
+    // map-hash, not by arrival sequence.
+    for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+        check(it->context == CTX_RESOURCE, "part packet context is RESOURCE");
+        receiver->receivePart(*it);
+    }
+    check(receiver->receiveComplete(), "receiver has all parts after out-of-order delivery");
+
+    std::vector<uint8_t> assembled;
+    check(receiver->assemble(assembled), "assemble() verifies hash and succeeds");
+    check(assembled == original, "assembled data matches the original payload");
+
+    Packet proof = receiver->buildReceiveProof(assembled);
+    check(proof.type == PROOF, "receive proof packet type is PROOF");
+    check(proof.context == CTX_RESOURCE_PRF, "receive proof context is RESOURCE_PRF");
+    check(proof.data.size() == Resource::HASH_LEN * 2, "receive proof payload is hash(32) || proof(32)");
+
+    delete sender;
+    delete receiver;
+    delete link;
+}
+
+static void test_resource_receive_proof_matches_rns() {
+    std::printf("test_resource_receive_proof_matches_rns\n");
+    std::vector<uint8_t> data = hexToBytes(TestVectors::RESOURCE_RECEIVE_PROOF_DATA_HEX);
+    std::vector<uint8_t> randomHash = hexToBytes(TestVectors::RESOURCE_RECEIVE_PROOF_RANDOM_HASH_HEX);
+    std::vector<uint8_t> resourceHash = hexToBytes(TestVectors::RESOURCE_RECEIVE_PROOF_RESOURCE_HASH_HEX);
+
+    std::vector<uint8_t> hashInput = data;
+    hashInput.insert(hashInput.end(), randomHash.begin(), randomHash.end());
+    checkHexEq(Crypto::sha256(hashInput), TestVectors::RESOURCE_RECEIVE_PROOF_RESOURCE_HASH_HEX,
+               "full_hash(data||random_hash) matches RNS's resource hash");
+
+    std::vector<uint8_t> proofInput = data;
+    proofInput.insert(proofInput.end(), resourceHash.begin(), resourceHash.end());
+    std::vector<uint8_t> proof = Crypto::sha256(proofInput);
+    std::vector<uint8_t> proofData = resourceHash;
+    proofData.insert(proofData.end(), proof.begin(), proof.end());
+    checkHexEq(proofData, TestVectors::RESOURCE_RECEIVE_PROOF_DATA_OUT_HEX,
+               "hash||full_hash(data||hash) matches RNS's RESOURCE_PRF payload");
+}
+
+static void test_resource_receive_rejects_out_of_scope_advertisement() {
+    std::printf("test_resource_receive_rejects_out_of_scope_advertisement\n");
+    Packet lr = Packet::parse(hexToBytes(TestVectors::LINK_RAW_LR_PACKET_HEX));
+    Link* link = Link::accept(lr);
+    check(link != nullptr, "link established for out-of-scope advertisement test");
+    if (!link) return;
+
+    // Same shape as the real vector, but with 'n' inflated past what 'm'
+    // actually carries -- simulates a transfer needing HMU hashmap
+    // pagination, which is out of scope.
+    cmp_ctx_t ctx;
+    MsgpackBuffer buf;
+    msgpackInitWriter(&ctx, &buf);
+    cmp_write_map(&ctx, 11);
+    cmp_write_str(&ctx, "t", 1); cmp_write_uinteger(&ctx, 928);
+    cmp_write_str(&ctx, "d", 1); cmp_write_uinteger(&ctx, 900);
+    cmp_write_str(&ctx, "n", 1); cmp_write_uinteger(&ctx, 999);
+    cmp_write_str(&ctx, "h", 1); { std::vector<uint8_t> h(32, 0xAB); cmp_write_bin(&ctx, h.data(), 32); }
+    cmp_write_str(&ctx, "r", 1); { std::vector<uint8_t> rh(4, 0xCD); cmp_write_bin(&ctx, rh.data(), 4); }
+    cmp_write_str(&ctx, "o", 1); { std::vector<uint8_t> h(32, 0xAB); cmp_write_bin(&ctx, h.data(), 32); }
+    cmp_write_str(&ctx, "i", 1); cmp_write_uinteger(&ctx, 1);
+    cmp_write_str(&ctx, "l", 1); cmp_write_uinteger(&ctx, 1);
+    cmp_write_str(&ctx, "q", 1); cmp_write_nil(&ctx);
+    cmp_write_str(&ctx, "f", 1); cmp_write_uinteger(&ctx, 0x01);
+    cmp_write_str(&ctx, "m", 1); { std::vector<uint8_t> m(4 * 4, 0xEE); cmp_write_bin(&ctx, m.data(), (uint32_t)m.size()); }
+
+    Resource* r = Resource::acceptAdvertisement(link, buf.out);
+    check(r == nullptr, "advertisement needing HMU hashmap pagination is rejected, not mishandled");
+
+    delete link;
+}
+
+static void test_ratchet_announce_validated_by_real_rns_bytes() {
+    std::printf("test_ratchet_announce_validated_by_real_rns_bytes\n");
+    Packet p = Packet::parse(hexToBytes(TestVectors::RATCHET_ANNOUNCE_RAW_PACKET_HEX));
+    check(p.type == ANNOUNCE, "parsed packet is an ANNOUNCE");
+    check(p.contextFlag, "context_flag is set when a ratchet is present");
+
+    std::vector<uint8_t> announcedPub, ratchetOut;
+    bool ok = Announce::validate(p, announcedPub, ratchetOut);
+    check(ok, "Announce::validate accepts a real RNS-signed ratcheted announce");
+    checkHexEq(ratchetOut, TestVectors::RATCHET_ANNOUNCE_RATCHET_PUBLIC_HEX, "extracted ratchet public key matches RNS");
+}
+
+static void test_ratchet_announce_build_round_trips() {
+    std::printf("test_ratchet_announce_build_round_trips\n");
+    Identity id(hexToBytes(TestVectors::IDENTITY_PRIVATE_KEY_HEX));
+    std::vector<uint8_t> destHash = hexToBytes(TestVectors::DEST_HASH_HEX);
+    std::vector<uint8_t> nameHash = hexToBytes(TestVectors::DEST_NAME_HASH_HEX);
+    std::vector<uint8_t> ratchet(32, 0x5A);
+
+    Packet p = Announce::build(&id, destHash, nameHash, std::vector<uint8_t>(), ratchet);
+    check(p.contextFlag, "build() sets context_flag when given a ratchet");
+
+    std::vector<uint8_t> announcedPub, ratchetOut;
+    check(Announce::validate(p, announcedPub, ratchetOut), "our own ratcheted announce validates");
+    check(ratchetOut == ratchet, "round-tripped ratchet matches what was passed to build()");
+
+    // No ratchet given -> no-ratchet path, unaffected (regression check
+    // against the earlier no-ratchet announce building/validating).
+    Packet p2 = Announce::build(&id, destHash, nameHash);
+    check(!p2.contextFlag, "build() without a ratchet leaves context_flag unset");
+    std::vector<uint8_t> pub2, ratchet2;
+    check(Announce::validate(p2, pub2, ratchet2), "a no-ratchet announce still validates");
+    check(ratchet2.empty(), "no ratchet extracted when none was present");
+}
+
+static void test_ratchet_identity_decrypt() {
+    std::printf("test_ratchet_identity_decrypt\n");
+    Identity id(hexToBytes(TestVectors::RATCHET_IDENTITY_ENCRYPT_PRIVATE_KEY_HEX));
+    std::vector<uint8_t> token = hexToBytes(TestVectors::RATCHET_IDENTITY_ENCRYPT_CIPHERTEXT_TOKEN_HEX);
+
+    // Without the ratchet on hand, only the static key is tried -- and this
+    // token was encrypted to the ratchet key, not the static one, so it
+    // must fail.
+    check(id.decrypt(token).empty(), "decrypting a ratchet-targeted token without the ratchet fails");
+
+    id.addRatchetForTesting(hexToBytes(TestVectors::RATCHET_IDENTITY_ENCRYPT_RATCHET_PRIVATE_HEX));
+    std::vector<uint8_t> plain = id.decrypt(token);
+    checkHexEq(plain, TestVectors::RATCHET_IDENTITY_ENCRYPT_PLAINTEXT_HEX,
+               "decrypting with the retained ratchet matches RNS's plaintext");
+}
+
+static void test_ratchet_rotation() {
+    std::printf("test_ratchet_rotation\n");
+    Identity id(hexToBytes(TestVectors::IDENTITY_PRIVATE_KEY_HEX));
+    check(id.latestRatchetPublic().empty(), "no ratchet exists before the first rotation");
+
+    id.rotateRatchets();
+    std::vector<uint8_t> first = id.latestRatchetPublic();
+    check(first.size() == 32, "rotateRatchets() produces a 32-byte public ratchet key");
+
+    // Immediately rotating again is a no-op inside the interval.
+    id.rotateRatchets();
+    check(id.latestRatchetPublic() == first, "rotating again inside RATCHET_INTERVAL_MS doesn't generate a new key");
+}
+
 // Regression check for a real bug found while designing the interop test:
 // a non-fragmenting interface (Serial/BLE, mtu == RNS packet size) must
 // pass every inbound frame straight to onPacket. ANNOUNCE (type=1) and
@@ -407,6 +596,14 @@ int main() {
     test_request_envelope_parse();
     test_resource_hash_orderings();
     test_resource_advertisement_self_consistency();
+    test_resource_accept_advertisement_from_real_rns_bytes();
+    test_resource_receive_round_trip();
+    test_resource_receive_proof_matches_rns();
+    test_resource_receive_rejects_out_of_scope_advertisement();
+    test_ratchet_announce_validated_by_real_rns_bytes();
+    test_ratchet_announce_build_round_trips();
+    test_ratchet_identity_decrypt();
+    test_ratchet_rotation();
     test_interface_passthrough_for_odd_typed_packets();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

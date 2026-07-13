@@ -32,10 +32,16 @@ struct StoredMessage {
 // LXMF_PROPAGATION_SPEC.md.
 //
 // Scope, stated plainly: implements the MESSAGE_GET path (list, fetch,
-// purge) that Sideband/NomadNet use to sync with a propagation node. Does
-// NOT implement: anti-spam stamps (LXStamper; this device enforces none
-// and expects none), peer-to-peer PN-to-PN sync (the /offer path), or
-// ratcheted announces. All are honestly called out in COMPLIANCE.md.
+// purge) that Sideband/NomadNet use to sync with a propagation node, direct
+// message uploads (single-packet or Resource, see RetiResource.h), and the
+// receiving half of peer-to-peer PN sync (the /offer path -- another PN can
+// push messages to this node's cache; this node does not initiate offers of
+// its own to other PNs, which would need to satisfy a possibly-nonzero
+// peer-declared stamp cost this firmware doesn't compute). The announce
+// this node sends (see Router::sendAnnounce) is ratcheted, like any other
+// destination's. Does NOT implement: anti-spam stamps on inbound messages
+// (LXStamper; this device enforces none and expects none). All honestly
+// called out in COMPLIANCE.md.
 class LXMFPropagationNode {
 public:
     std::vector<uint8_t> nameHash;  // 10 bytes: SHA256("lxmf.propagation")[:10]
@@ -54,6 +60,10 @@ public:
     static const size_t MAX_STORED_MESSAGES = 40;   // quota: oldest evicted first past this count
     static const size_t MAX_RESPONSE_BUDGET = 8000; // bytes served per MESSAGE_GET call, like RNS's client_transfer_limit
 
+    // LXMPeer error response codes (single-byte uint in the response value slot).
+    static const uint8_t ERROR_NO_IDENTITY  = 0xf0;
+    static const uint8_t ERROR_INVALID_DATA = 0xf4;
+
     LXMFPropagationNode(Identity* node_id) : id(node_id) {
         nameHash = Destination::nameHash("lxmf", "propagation");
         propHash = Destination::hash(nameHash, id->getAddress());
@@ -64,6 +74,9 @@ public:
 
         requestHandler.registerHandler("/get", [this](const std::vector<uint8_t>& dataPayload, Link* link) {
             return this->handleMessageGet(dataPayload, link);
+        });
+        requestHandler.registerHandler("/offer", [this](const std::vector<uint8_t>& dataPayload, Link* link) {
+            return this->handleOffer(dataPayload, link);
         });
     }
 
@@ -167,14 +180,67 @@ private:
             std::vector<uint8_t> plaintext = link->decrypt(p.data);
             if (plaintext.empty()) return;
             for (auto& kv : activeResources) {
-                if (kv.second->link != link) continue;
+                if (kv.second->link != link || kv.second->isReceiving) continue;
                 std::vector<Packet> parts = kv.second->handleRequest(plaintext);
                 for (auto& part : parts) src->send(part.serialize());
             }
+        } else if (p.context == CTX_RESOURCE_ADV) {
+            handleInboundResourceAdvertisement(p, link, src);
+        } else if (p.context == CTX_RESOURCE) {
+            handleInboundResourcePart(p, link, src);
         } else if (p.context == CTX_NONE) {
             handlePropagationUpload(p, link, src);
         }
         // KEEPALIVE: link->touch() above already covers it, no reply needed.
+    }
+
+    // A peer offering us a resource -- either a client's large propagation
+    // upload (LXMessage representation=RESOURCE) or the follow-up transfer
+    // after a successful /offer response (LXMPeer.offer_response, which
+    // always uses a Resource regardless of size). Accept it (see
+    // Resource::acceptAdvertisement's documented scope) and immediately
+    // request every part -- see Resource::buildRequestForAllParts.
+    void handleInboundResourceAdvertisement(const Packet& p, Link* link, Interface* src) {
+        std::vector<uint8_t> plaintext = link->decrypt(p.data);
+        if (plaintext.empty()) return;
+
+        Resource* res = Resource::acceptAdvertisement(link, plaintext);
+        if (!res) return; // out of scope or malformed -- sender's advertisement will retry then time out
+
+        auto old = activeResources.find(res->hash);
+        if (old != activeResources.end()) { delete old->second; }
+        activeResources[res->hash] = res;
+
+        Packet req = res->buildRequestForAllParts();
+        src->send(req.serialize());
+    }
+
+    // A part of a resource we're receiving. RESOURCE-context packets carry
+    // no resource identifier of their own (see RNS.Resource.receive_part),
+    // so it's matched against every receiving resource on this link by
+    // map-hash. On completion, assembles, feeds the result through the same
+    // message-array handling as a direct propagation upload, and replies
+    // with a receive proof (Resource::buildReceiveProof) so the peer's
+    // transfer resolves as delivered.
+    void handleInboundResourcePart(const Packet& p, Link* link, Interface* src) {
+        for (auto it = activeResources.begin(); it != activeResources.end(); ++it) {
+            Resource* res = it->second;
+            if (res->link != link || !res->isReceiving || res->receiveComplete()) continue;
+
+            res->receivePart(p);
+            if (!res->receiveComplete()) continue;
+
+            std::vector<uint8_t> assembled;
+            if (res->assemble(assembled)) {
+                processMessageArray(assembled);
+                Packet proof = res->buildReceiveProof(assembled);
+                src->send(proof.serialize());
+            }
+
+            delete res;
+            activeResources.erase(it);
+            return;
+        }
     }
 
     // A message upload from a client: LXMessage.send() for method=PROPAGATED,
@@ -189,25 +255,33 @@ private:
     void handlePropagationUpload(const Packet& p, Link* link, Interface* src) {
         std::vector<uint8_t> plaintext = link->decrypt(p.data);
         if (plaintext.empty()) return;
+        if (!processMessageArray(plaintext)) return;
 
+        Packet proof = link->buildPacketProof(id, p);
+        src->send(proof.serialize());
+    }
+
+    // Shared by both ways a message array can arrive: a direct single-packet
+    // upload (handlePropagationUpload) and an assembled Resource, whether
+    // from a large upload or an /offer sync response (handleInboundResourcePart)
+    // -- both carry the identical msgpack([timestamp, [lxmf_data, ...]]) shape.
+    bool processMessageArray(const std::vector<uint8_t>& plaintext) {
         cmp_ctx_t ctx;
         MsgpackBuffer buf;
         msgpackInitReader(&ctx, &buf, plaintext);
         uint32_t arrLen = 0;
-        if (!cmp_read_array(&ctx, &arrLen) || arrLen < 2) return;
+        if (!cmp_read_array(&ctx, &arrLen) || arrLen < 2) return false;
 
         // [0]: remote timebase (float) -- not used, this node has no RTC.
         cmp_object_t obj;
-        if (!cmp_read_object(&ctx, &obj)) return;
+        if (!cmp_read_object(&ctx, &obj)) return false;
 
         std::vector<std::vector<uint8_t>> messages;
         bool wasNil = false;
-        if (!cmpReadOptionalBinArray(&ctx, messages, wasNil, 4096) || wasNil) return;
+        if (!cmpReadOptionalBinArray(&ctx, messages, wasNil, 4096) || wasNil) return false;
 
         for (auto& lxmfData : messages) cacheIncomingMessage(lxmfData);
-
-        Packet proof = link->buildPacketProof(id, p);
-        src->send(proof.serialize());
+        return true;
     }
 
     // MESSAGE_GET ("/get"): data = [wants_or_nil, haves_or_nil]. [nil, nil]
@@ -264,6 +338,81 @@ private:
         }
         cmp_write_array(&wctx, (uint32_t)blobs.size());
         for (auto& blob : blobs) cmpWriteBin(&wctx, blob);
+        return wbuf.out;
+    }
+
+    // Peer-to-peer propagation sync, receiving half only: another
+    // propagation node (or peer) offers a batch of transient IDs it holds,
+    // and we say which of them we don't already have -- see
+    // LXMPeer.offer_request. Requires LINKIDENTIFY, same as /get, since an
+    // unidentified peer can't be trusted/attributed.
+    //
+    // The peering_key ([0] of data) is intentionally never inspected:
+    // real peers PoW-stamp it to meet a target propagation cost
+    // (LXStamper.validate_peering_key), but this node always announces
+    // peering_cost=0 (see buildAnnounceAppData), and at cost 0 the target
+    // threshold is larger than any possible 256-bit hash, so validation is
+    // unconditionally true regardless of the key's contents -- there's
+    // nothing to check. Outbound peering (this node offering messages *to*
+    // other PNs, which could need to satisfy a non-zero peer-declared cost)
+    // is not implemented -- see COMPLIANCE.md.
+    //
+    // The actual message transfer this response triggers always arrives as
+    // a Resource (LXMPeer.offer_response never uses a plain packet), so it's
+    // handled by the same Resource-receive path as a large direct upload --
+    // see handleInboundResourceAdvertisement/handleInboundResourcePart.
+    std::vector<uint8_t> handleOffer(const std::vector<uint8_t>& dataPayload, Link* link) {
+        cmp_ctx_t wctx;
+        MsgpackBuffer wbuf;
+        msgpackInitWriter(&wctx, &wbuf);
+
+        if (!link->remoteIdentified) {
+            cmp_write_uinteger(&wctx, ERROR_NO_IDENTITY);
+            return wbuf.out;
+        }
+
+        cmp_ctx_t ctx;
+        MsgpackBuffer buf;
+        msgpackInitReader(&ctx, &buf, dataPayload);
+        uint32_t arrLen = 0;
+        if (!cmp_read_array(&ctx, &arrLen) || arrLen < 2) {
+            cmp_write_uinteger(&wctx, ERROR_INVALID_DATA);
+            return wbuf.out;
+        }
+
+        // [0]: peering_key -- read and discarded, see method comment.
+        cmp_object_t obj;
+        if (!cmp_read_object(&ctx, &obj)) {
+            cmp_write_uinteger(&wctx, ERROR_INVALID_DATA);
+            return wbuf.out;
+        }
+        if (obj.type == CMP_TYPE_BIN8 || obj.type == CMP_TYPE_BIN16 || obj.type == CMP_TYPE_BIN32) {
+            if (!ctx.skip(&ctx, obj.as.bin_size)) {
+                cmp_write_uinteger(&wctx, ERROR_INVALID_DATA);
+                return wbuf.out;
+            }
+        }
+
+        std::vector<std::vector<uint8_t>> offered;
+        bool wasNil = false;
+        if (!cmpReadOptionalBinArray(&ctx, offered, wasNil, 32) || wasNil) {
+            cmp_write_uinteger(&wctx, ERROR_INVALID_DATA);
+            return wbuf.out;
+        }
+
+        std::vector<std::vector<uint8_t>> wanted;
+        for (auto& tid : offered) {
+            if (!findByTransientId(tid)) wanted.push_back(tid);
+        }
+
+        if (wanted.empty()) {
+            cmp_write_false(&wctx); // already have everything offered
+        } else if (wanted.size() == offered.size()) {
+            cmp_write_true(&wctx); // want everything offered
+        } else {
+            cmp_write_array(&wctx, (uint32_t)wanted.size());
+            for (auto& tid : wanted) cmp_write_bin(&wctx, tid.data(), (uint32_t)tid.size());
+        }
         return wbuf.out;
     }
 
