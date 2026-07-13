@@ -61,6 +61,16 @@ Python packages, not just "should be compatible" — see `test/host/`.
 - **A real LXMF propagation node.** Caches inbound messages to flash
   under their transient ID, answers `MESSAGE_GET` (list / want / have)
   the way a Python `LXMRouter` peer does, purges on acknowledged pickup.
+- **Resource transfer, both directions.** Sends oversized Request/Response
+  replies as a Resource, and *receives* one too — large messages and
+  attachments upload correctly, not just short single-packet ones (within
+  a documented single-segment size ceiling — see `COMPLIANCE.md`).
+- **Peer sync, receiving half.** Answers `/offer` the way another
+  propagation node would: says which offered messages it doesn't already
+  have, accepts the follow-up transfer. Other PNs can push into this
+  node's cache, not just direct clients.
+- **Ratcheted announces.** Rotates a forward-secrecy key alongside the
+  static identity, like any other RNS destination's announce.
 - **Hardware entropy.** Identity keys, ephemeral link keys, and IVs come
   from the nRF52840's RNG peripheral (or ESP32's) — not `random()`.
 
@@ -70,14 +80,14 @@ Said plainly, not buried:
 
 - No anti-spam stamps (`LXStamper`). This node accepts anything addressed
   to it. Don't leave it wide open on a public mesh.
-- No propagation-node-to-propagation-node sync (the `/offer` path). It
-  serves clients directly; it doesn't gossip caches with other PNs.
-- No ratcheted announces.
-- No Resource *receive* path. It can send Resources but not accept one —
-  and LXMF only sends a message as a single link packet if it's under
-  319 bytes; anything longer, or carrying an attachment, uploads as a
-  Resource instead. Short messages sync fine. Longer ones or anything
-  with an attachment will fail to upload until this is built.
+- No *outbound* peer sync. This node accepts messages other propagation
+  nodes offer it, but doesn't proactively offer its own cache to other
+  PNs — that would need real proof-of-work to satisfy a peer-declared
+  cost, which isn't implemented.
+- Resource receive tops out around 34KB in one transfer (no multi-segment,
+  no hashmap pagination for very large single uploads). Ordinary messages
+  and modest attachments sync fine; anything bigger will stall on the
+  sender's side rather than complete.
 
 Full line-item ledger, with the RNS manual section each row maps to:
 `COMPLIANCE.md`.
